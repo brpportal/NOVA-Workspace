@@ -13,31 +13,6 @@ import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-/**
- * Structured outcome of a GET {baseUrl}/models call, so the UI can react
- * honestly instead of collapsing every case into a generic "error".
- */
-sealed interface FetchModelsResult {
-    /** HTTP 200 and at least one model id was returned. */
-    data class Success(val models: List<String>) : FetchModelsResult
-
-    /**
-     * HTTP 200 but the provider returned an empty model list. This is NOT an
-     * error: some providers/plans (e.g. an exhausted free plan) legitimately
-     * return `{"data": []}`. The user can still type a model name manually.
-     */
-    data class Empty(val modelsUrl: String) : FetchModelsResult
-
-    /** The endpoint answered with a non-2xx HTTP status. */
-    data class HttpError(val code: Int, val reason: String, val modelsUrl: String) : FetchModelsResult
-
-    /** HTTP 200 but the body was not parseable as a models list. */
-    data class Malformed(val modelsUrl: String, val detail: String) : FetchModelsResult
-
-    /** The request never completed (DNS, timeout, TLS, ...). */
-    data class NetworkError(val message: String) : FetchModelsResult
-}
-
 class OpenAICompatibleProvider(
     private val apiKey: String,
     private val model: String = "gpt-4o-mini",
@@ -69,12 +44,7 @@ class OpenAICompatibleProvider(
             return clean
         }
 
-        /**
-         * Detailed variant of [fetchModels]: never throws for provider-side
-         * outcomes; every case is reported as a [FetchModelsResult] so callers
-         * can distinguish "no models on this plan" (info) from real errors.
-         */
-        suspend fun fetchModelsDetailed(baseUrl: String, apiKey: String, timeoutSeconds: Long = 15): FetchModelsResult = withContext(Dispatchers.IO) {
+        suspend fun fetchModels(baseUrl: String, apiKey: String, timeoutSeconds: Long = 15): List<String> = withContext(Dispatchers.IO) {
             val cleanBase = normalizeBaseUrl(baseUrl)
             val modelsUrl = "$cleanBase/models"
             val client = OkHttpClient.Builder()
@@ -87,79 +57,46 @@ class OpenAICompatibleProvider(
                 reqBuilder.addHeader("Authorization", "Bearer ${apiKey.trim()}")
             }
 
-            try {
-                client.newCall(reqBuilder.build()).execute().use { response ->
-                    val body = response.body?.string().orEmpty()
-                    if (!response.isSuccessful) {
-                        val reason = body.trim().ifBlank { response.message }.take(200)
-                        return@withContext FetchModelsResult.HttpError(response.code, reason, modelsUrl)
-                    }
-                    when (val parsed = parseModelsBody(body)) {
-                        null -> FetchModelsResult.Malformed(modelsUrl, "Response was not a JSON models list.")
-                        else -> if (parsed.isEmpty()) {
-                            FetchModelsResult.Empty(modelsUrl)
-                        } else {
-                            FetchModelsResult.Success(parsed.distinct().sorted())
+            client.newCall(reqBuilder.build()).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    throw IllegalStateException("HTTP ${response.code}: $body")
+                }
+
+                val modelList = mutableListOf<String>()
+                try {
+                    val root = JSONObject(body)
+                    val dataArr = root.optJSONArray("data") ?: root.optJSONArray("models")
+                    if (dataArr != null) {
+                        for (i in 0 until dataArr.length()) {
+                            val item = dataArr.get(i)
+                            if (item is JSONObject) {
+                                val id = item.optString("id").ifBlank { item.optString("name") }
+                                if (id.isNotBlank()) modelList.add(id)
+                            } else if (item is String && item.isNotBlank()) {
+                                modelList.add(item)
+                            }
                         }
                     }
-                }
-            } catch (e: Exception) {
-                FetchModelsResult.NetworkError(e.message ?: "Network request failed")
-            }
-        }
-
-        /**
-         * Extracts model ids from a /models response body.
-         * Returns null when the body is not parseable as a models list at all,
-         * and an empty list when it parses but contains zero models.
-         */
-        private fun parseModelsBody(body: String): List<String>? {
-            if (body.isBlank()) return null
-            val modelList = mutableListOf<String>()
-            fun collect(arr: JSONArray) {
-                for (i in 0 until arr.length()) {
-                    val item = arr.get(i)
-                    if (item is JSONObject) {
-                        val id = item.optString("id").ifBlank { item.optString("name") }
-                        if (id.isNotBlank()) modelList.add(id)
-                    } else if (item is String && item.isNotBlank()) {
-                        modelList.add(item)
+                } catch (e: Exception) {
+                    // Try parsing as array directly
+                    try {
+                        val arr = JSONArray(body)
+                        for (i in 0 until arr.length()) {
+                            val item = arr.get(i)
+                            if (item is JSONObject) {
+                                val id = item.optString("id").ifBlank { item.optString("name") }
+                                if (id.isNotBlank()) modelList.add(id)
+                            } else if (item is String && item.isNotBlank()) {
+                                modelList.add(item)
+                            }
+                        }
+                    } catch (e2: Exception) {
+                        throw IllegalStateException("Failed to parse models JSON: ${e.message}")
                     }
                 }
-            }
-            // Object form: {"data": [...]} or {"models": [...]}
-            try {
-                val root = JSONObject(body)
-                val dataArr = root.optJSONArray("data") ?: root.optJSONArray("models")
-                if (dataArr != null) {
-                    collect(dataArr)
-                    return modelList
-                }
-                return null
-            } catch (e: Exception) {
-                // fall through to bare-array form
-            }
-            // Bare array form: [...]
-            return try {
-                collect(JSONArray(body))
-                modelList
-            } catch (e: Exception) {
-                null
-            }
-        }
 
-        /**
-         * Backwards-compatible helper: returns the model list (possibly empty
-         * when the provider legitimately reports zero models) and throws with
-         * the real HTTP status / parse problem for genuine failures.
-         */
-        suspend fun fetchModels(baseUrl: String, apiKey: String, timeoutSeconds: Long = 15): List<String> {
-            return when (val result = fetchModelsDetailed(baseUrl, apiKey, timeoutSeconds)) {
-                is FetchModelsResult.Success -> result.models
-                is FetchModelsResult.Empty -> emptyList()
-                is FetchModelsResult.HttpError -> throw IllegalStateException("HTTP ${result.code}: ${result.reason}")
-                is FetchModelsResult.Malformed -> throw IllegalStateException("Failed to parse models response from ${result.modelsUrl}: ${result.detail}")
-                is FetchModelsResult.NetworkError -> throw IllegalStateException(result.message)
+                modelList.distinct().sorted()
             }
         }
     }
@@ -174,44 +111,41 @@ class OpenAICompatibleProvider(
         }
     }
 
-    /**
-     * Lightweight connection check: a single GET {baseUrl}/models call.
-     * Reports the REAL outcome — HTTP status and how many models the provider
-     * actually returned — instead of burning a chat completion on a "ping".
-     * Note: an HTTP 200 with 0 models still means "connected"; it usually
-     * means the plan exposes no models, in which case a manually typed model
-     * name may or may not work — chat will surface the provider's real error.
-     */
-    override suspend fun testConnection(): ConnectionResult {
+    override suspend fun testConnection(): ConnectionResult = withContext(Dispatchers.IO) {
         val validation = validateConfiguration()
-        if (!validation.isValid) return ConnectionResult(false, 0, validation.errorMessage.orEmpty())
+        if (!validation.isValid) return@withContext ConnectionResult(false, 0, validation.errorMessage.orEmpty())
 
         val startTime = System.currentTimeMillis()
-        val result = fetchModelsDetailed(baseUrl, apiKey, timeoutSeconds = 15)
-        val latency = System.currentTimeMillis() - startTime
-        return when (result) {
-            is FetchModelsResult.Success -> ConnectionResult(
-                true, latency,
-                "Connected — HTTP 200 in ${latency}ms. ${result.models.size} model(s) available at $baseUrl."
-            )
-            is FetchModelsResult.Empty -> ConnectionResult(
-                true, latency,
-                "Connected — HTTP 200 in ${latency}ms, but the provider returned 0 models. " +
-                    "The active model '$model' is not confirmed by this provider; if chat fails, " +
-                    "type a model name that exists on your plan."
-            )
-            is FetchModelsResult.HttpError -> ConnectionResult(
-                false, latency,
-                "Connection failed — HTTP ${result.code}: ${result.reason}"
-            )
-            is FetchModelsResult.Malformed -> ConnectionResult(
-                false, latency,
-                "Reached $baseUrl but the /models response was not valid JSON — check the Base URL."
-            )
-            is FetchModelsResult.NetworkError -> ConnectionResult(
-                false, latency,
-                "Connection failed: ${result.message}"
-            )
+        val payload = JSONObject().apply {
+            put("model", model)
+            put("messages", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", "ping")
+                })
+            })
+            put("max_tokens", 5)
+        }
+
+        val request = Request.Builder()
+            .url(endpoint)
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(payload.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        try {
+            client.newCall(request).execute().use { response ->
+                val latency = System.currentTimeMillis() - startTime
+                if (response.isSuccessful) {
+                    ConnectionResult(true, latency, "Connected to $endpoint ($model) successfully in ${latency}ms.")
+                } else {
+                    val err = response.body?.string().orEmpty()
+                    ConnectionResult(false, latency, "HTTP ${response.code}: $err")
+                }
+            }
+        } catch (e: Exception) {
+            ConnectionResult(false, 0, "Connection failed: ${e.message}")
         }
     }
 

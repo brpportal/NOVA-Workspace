@@ -1,5 +1,5 @@
 {
-  "name": "NOVA Workspace",
+  "name": "Spark",
   "description": "Production native AI workspace with autonomous browser agent, encrypted secret vault, local file manager, and granular permissions.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

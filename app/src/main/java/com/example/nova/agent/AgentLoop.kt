@@ -18,7 +18,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -29,6 +28,10 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
+import com.example.nova.data.ApprovalDao
+import com.example.nova.data.ApprovalRecordEntity
+import com.example.nova.security.SecretRedactor
+
 class AgentLoop(
     private val taskDao: TaskDao,
     private val chatDao: ChatDao,
@@ -38,7 +41,9 @@ class AgentLoop(
     private val permissionManager: PermissionManager,
     private val browserController: BrowserController,
     private val workspaceManager: WorkspaceManager,
-    private val maxStepsLimit: Int = 25
+    private val maxStepsLimit: Int = 25,
+    private val approvalDao: ApprovalDao? = null,
+    private val onPresenceChange: (PipelinePresence) -> Unit = {}
 ) {
     // Map of active running jobs per taskId
     private val activeJobs = ConcurrentHashMap<String, Job>()
@@ -70,12 +75,6 @@ class AgentLoop(
         messages.add(contextBuilder.buildSystemContext())
         messages.add(AIMessage(role = "user", content = task.prompt))
 
-        // Chat gets ONE concise status line per task run — step-by-step
-        // narration belongs in the task detail/log, not as chat bubbles.
-        if (conversationId != null) {
-            postToChatOnce(conversationId, "system", "🛠 Working on it — follow progress in the **Tasks** tab.")
-        }
-
         var stepNumber = 1
         var duplicateCount = 0
         var lastToolCallSignature = ""
@@ -83,6 +82,8 @@ class AgentLoop(
         val logBuffer = StringBuilder()
 
         browserController.setPlanAndStep("Autonomous Task: ${task.title}", "Starting execution")
+
+        onPresenceChange(PipelinePresence.WORKING)
 
         try {
             while (stepNumber <= maxStepsLimit && currentCoroutineContext().isActive) {
@@ -94,6 +95,7 @@ class AgentLoop(
                         updatedAt = System.currentTimeMillis()
                     )
                     taskDao.updateTask(currentTask)
+                    onPresenceChange(PipelinePresence.READY)
                     return@withContext
                 }
 
@@ -103,19 +105,33 @@ class AgentLoop(
                     updatedAt = System.currentTimeMillis()
                 )
                 taskDao.updateTask(currentTask)
+                onPresenceChange(PipelinePresence.COMPOSING)
 
                 val response = provider.sendMessage(messages, toolRegistry.availableTools)
 
-                // Assistant text stays in the agent's own message chain. It is
-                // NOT mirrored into chat per step (that produced repeated
-                // narration bubbles); only the final answer is posted, once.
+                // If response has assistant text: keep it in the model history.
+                // Per-step narration belongs to the task's step log, NOT the
+                // chat — only the final answer is posted to chat, once
+                // (fix-round behaviour, restored in the Spark merge).
                 val assistantText = response.text.orEmpty()
                 if (assistantText.isNotBlank()) {
+                    onPresenceChange(PipelinePresence.RESPONDING)
                     messages.add(AIMessage(role = "assistant", content = assistantText))
                 }
 
                 // If no tool calls requested, the agent completed the task!
                 if (response.toolCalls.isEmpty()) {
+                    if (conversationId != null && assistantText.isNotBlank()) {
+                        chatDao.insertMessage(
+                            ChatMessageEntity(
+                                id = UUID.randomUUID().toString(),
+                                conversationId = conversationId,
+                                sender = "assistant",
+                                content = assistantText,
+                                timestamp = System.currentTimeMillis()
+                            )
+                        )
+                    }
                     currentTask = currentTask.copy(
                         status = "COMPLETED",
                         currentOperation = "Task finished successfully.",
@@ -124,15 +140,20 @@ class AgentLoop(
                         updatedAt = System.currentTimeMillis()
                     )
                     taskDao.updateTask(currentTask)
-                    if (conversationId != null && assistantText.isNotBlank()) {
-                        postToChatOnce(conversationId, "assistant", assistantText)
-                    }
+                    onPresenceChange(PipelinePresence.READY)
                     break
                 }
 
                 // Process tool calls
                 for (toolCall in response.toolCalls) {
                     if (!currentCoroutineContext().isActive) break
+
+                    val isFileTool = toolCall.name in listOf("write_file", "create_file", "append_file", "save_file")
+                    if (isFileTool) {
+                        onPresenceChange(PipelinePresence.MAKING_SOMETHING)
+                    } else {
+                        onPresenceChange(PipelinePresence.WORKING)
+                    }
 
                     val signature = "${toolCall.name}|${toolCall.argumentsJson}"
                     if (signature == lastToolCallSignature) {
@@ -178,16 +199,38 @@ class AgentLoop(
                     }
 
                     if (decision == PermissionDecision.REQUIRES_USER_APPROVAL) {
+                        // Check if tool is recognized
+                        val isRecognized = toolRegistry.getTool(toolCall.name) != null
+                        val redactedArgs = SecretRedactor.redactSecrets(toolCall.argumentsJson)
+                        val summaryText = if (isRecognized) {
+                            "Tool: ${toolCall.name}\nArguments: $redactedArgs"
+                        } else {
+                            "This action wasn't recognized. Approve it only if you expected it.\nTool: ${toolCall.name}\nArguments: $redactedArgs"
+                        }
+
+                        // Persist approval record in Room
+                        val approvalRecord = ApprovalRecordEntity(
+                            id = UUID.randomUUID().toString(),
+                            actionName = toolCall.name,
+                            toolName = toolCall.name,
+                            argumentsSummary = summaryText,
+                            status = "PENDING",
+                            createdAt = System.currentTimeMillis(),
+                            taskId = taskId
+                        )
+                        approvalDao?.insertApproval(approvalRecord)
+
                         // Pause task and request approval in UI
                         currentTask = currentTask.copy(
                             status = "WAITING_APPROVAL",
                             currentOperation = "Waiting for user approval to execute '${toolCall.name}'",
                             requiresApprovalAction = "${toolCall.name} on $domain",
                             pendingApprovalToolName = toolCall.name,
-                            pendingApprovalArgumentsJson = toolCall.argumentsJson,
+                            pendingApprovalArgumentsJson = summaryText,
                             updatedAt = System.currentTimeMillis()
                         )
                         taskDao.updateTask(currentTask)
+                        onPresenceChange(PipelinePresence.NEEDS_APPROVAL)
                         return@withContext // Task paused until user clicks Approve in UI
                     }
 
@@ -255,6 +298,10 @@ class AgentLoop(
             )
             taskDao.updateTask(currentTask)
         } catch (e: Exception) {
+            val isQuotaError = e.message?.contains("429") == true || e.message?.contains("quota", ignoreCase = true) == true
+            if (isQuotaError) {
+                onPresenceChange(PipelinePresence.PROVIDER_LIMIT_REACHED)
+            }
             currentTask = currentTask.copy(
                 status = "FAILED",
                 currentOperation = "Task failed: ${e.message}",
@@ -263,6 +310,7 @@ class AgentLoop(
             )
             taskDao.updateTask(currentTask)
         } finally {
+            onPresenceChange(PipelinePresence.READY)
             try {
                 val datePrefix = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
                 val cleanTitle = task.title.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(25).trimEnd('_')
@@ -283,31 +331,6 @@ class AgentLoop(
                 )
             } catch (ignored: Exception) {}
             activeJobs.remove(taskId)
-        }
-    }
-
-    /**
-     * Posts a message to the conversation, skipping it when the immediately
-     * preceding non-user message already has identical content (prevents the
-     * duplicate-bubble problem, e.g. the same status line on task resume).
-     */
-    private suspend fun postToChatOnce(conversationId: String, sender: String, content: String) {
-        try {
-            val last = chatDao.getMessagesForConversation(conversationId)
-                .firstOrNull()
-                ?.lastOrNull { it.sender != "user" }
-            if (last != null && last.content == content) return
-            chatDao.insertMessage(
-                ChatMessageEntity(
-                    id = UUID.randomUUID().toString(),
-                    conversationId = conversationId,
-                    sender = sender,
-                    content = content,
-                    timestamp = System.currentTimeMillis()
-                )
-            )
-        } catch (e: Exception) {
-            // Chat mirroring must never fail the task itself.
         }
     }
 

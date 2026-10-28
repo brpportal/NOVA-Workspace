@@ -2,7 +2,9 @@ package com.example.nova.data
 
 import android.content.Context
 import com.example.nova.agent.AgentLoop
+import com.example.nova.agent.ChatIntent
 import com.example.nova.agent.ContextBuilder
+import com.example.nova.agent.PipelinePresence
 import com.example.nova.agent.ToolExecutor
 import com.example.nova.agent.ToolRegistry
 import com.example.nova.ai.AIMessage
@@ -15,8 +17,11 @@ import com.example.nova.security.VaultManager
 import com.example.nova.workspace.WorkspaceManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -35,11 +40,15 @@ class NovaRepository(
     val secretDao = db.secretDao()
     val permissionDao = db.permissionDao()
     val settingsDao = db.settingsDao()
+    val approvalDao = db.approvalDao()
 
     val vaultManager = VaultManager(secretDao)
     val toolRegistry = ToolRegistry()
     val toolExecutor = ToolExecutor(browserController, workspaceManager, memoryDao, vaultManager)
     val contextBuilder = ContextBuilder(workspaceManager, memoryDao, browserController)
+
+    val pipelinePresence = MutableStateFlow(PipelinePresence.READY)
+
     val agentLoop = AgentLoop(
         taskDao = taskDao,
         chatDao = chatDao,
@@ -48,7 +57,9 @@ class NovaRepository(
         contextBuilder = contextBuilder,
         permissionManager = permissionManager,
         browserController = browserController,
-        workspaceManager = workspaceManager
+        workspaceManager = workspaceManager,
+        approvalDao = approvalDao,
+        onPresenceChange = { pipelinePresence.value = it }
     )
 
     // Reactive Flows
@@ -59,6 +70,47 @@ class NovaRepository(
     val bookmarks: Flow<List<BookmarkEntity>> = browserDao.getAllBookmarks()
     val history: Flow<List<BrowserHistoryEntry>> = browserDao.getHistory()
     val settings: Flow<List<AppSettingsEntity>> = settingsDao.getAllSettings()
+    val approvals: Flow<List<ApprovalRecordEntity>> = approvalDao.getAllApprovals()
+
+    init {
+        // Start background approval timeout loop (2-minute timeout)
+        scope.launch {
+            while (isActive) {
+                try {
+                    checkApprovalTimeouts()
+                } catch (ignored: Exception) {}
+                delay(5000)
+            }
+        }
+    }
+
+    private suspend fun checkApprovalTimeouts() {
+        val pending = approvalDao.getPendingApprovals()
+        val now = System.currentTimeMillis()
+        for (record in pending) {
+            if (now - record.createdAt >= 120_000) { // 2 minutes
+                val updatedRecord = record.copy(status = "TIMED_OUT", decidedAt = now)
+                approvalDao.updateApproval(updatedRecord)
+
+                if (!record.taskId.isNullOrBlank()) {
+                    val task = taskDao.getTaskById(record.taskId)
+                    if (task != null && task.status == "WAITING_APPROVAL") {
+                        taskDao.updateTask(
+                            task.copy(
+                                status = "FAILED",
+                                currentOperation = "Approval request timed out after 2 minutes. Action was NOT approved.",
+                                errorMessage = "Approval timed out (2m limit)",
+                                requiresApprovalAction = null,
+                                pendingApprovalToolName = null,
+                                pendingApprovalArgumentsJson = null,
+                                updatedAt = now
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
 
     suspend fun getActiveProvider(): AIProviderAdapter {
         val providerType = settingsDao.getSetting("ai_provider_type") ?: "gemini"
@@ -66,87 +118,6 @@ class NovaRepository(
         val model = settingsDao.getSetting("ai_model")
         val endpoint = settingsDao.getSetting("ai_endpoint")
         return AIProviderFactory.createProvider(providerType, apiKey, model, endpoint)
-    }
-
-    /**
-     * Returns null when a REAL provider is configured and valid, otherwise a
-     * short human-readable reason. The offline FakeAIProvider does not count
-     * as "configured": its scripted replies must never be presented to the
-     * user as if a real model answered (see FIX notes in ChatScreen).
-     */
-    suspend fun providerUnavailableReason(): String? {
-        val provider = getActiveProvider()
-        if (provider is FakeAIProvider) {
-            val type = settingsDao.getSetting("ai_provider_type")?.lowercase()
-            return if (type == "fake" || type == "offline" || type == "mock") {
-                "Offline demo mode is selected — it does not run a real AI model and its scripted replies are not shown as answers."
-            } else {
-                "No AI provider is configured yet."
-            }
-        }
-        val validation = provider.validateConfiguration()
-        return if (validation.isValid) null else (validation.errorMessage ?: "The configured provider is incomplete.")
-    }
-
-    /**
-     * Answers a plain chat message with the configured provider. No task is
-     * created. When no real provider is available — or the provider call
-     * fails — an honestly labelled system notice with the REAL state/error
-     * is stored instead of any canned reply.
-     */
-    suspend fun sendChatReply(conversationId: String) {
-        suspend fun insertNotice(text: String) {
-            chatDao.insertMessage(
-                ChatMessageEntity(
-                    id = UUID.randomUUID().toString(),
-                    conversationId = conversationId,
-                    sender = "system",
-                    content = text,
-                    timestamp = System.currentTimeMillis()
-                )
-            )
-        }
-
-        val unavailable = providerUnavailableReason()
-        if (unavailable != null) {
-            insertNotice("⚠️ **System notice — not an AI reply.** $unavailable Add your Base URL and API key in **Settings → AI Engine**, then try again.")
-            return
-        }
-
-        val provider = getActiveProvider()
-        try {
-            val history = chatDao.getMessagesForConversation(conversationId).firstOrNull().orEmpty()
-                .filter { it.sender == "user" || it.sender == "assistant" }
-                .takeLast(20)
-            val messages = mutableListOf(
-                AIMessage(
-                    role = "system",
-                    content = "You are NOVA, the assistant inside the NOVA Workspace Android app. " +
-                        "This is plain chat: answer the user directly, helpfully and concisely, " +
-                        "in the user's language and script (they may write Roman Urdu / Hinglish). " +
-                        "You cannot run tools in chat mode. If the user asks for an action " +
-                        "(open a site, search, create a file), tell them to phrase it as a direct " +
-                        "request and the agent will pick it up as a task."
-                )
-            )
-            for (m in history) {
-                messages.add(AIMessage(role = if (m.sender == "user") "user" else "assistant", content = m.content))
-            }
-            val response = provider.sendMessage(messages, emptyList())
-            val text = response.text?.takeIf { it.isNotBlank() }
-                ?: "(The model returned an empty reply.)"
-            chatDao.insertMessage(
-                ChatMessageEntity(
-                    id = UUID.randomUUID().toString(),
-                    conversationId = conversationId,
-                    sender = "assistant",
-                    content = text,
-                    timestamp = System.currentTimeMillis()
-                )
-            )
-        } catch (e: Exception) {
-            insertNotice("⚠️ **System notice — not an AI reply.** The AI provider could not answer: ${e.message ?: "unknown error"}")
-        }
     }
 
     suspend fun initializeSeedData() {
@@ -157,7 +128,7 @@ class NovaRepository(
             chatDao.insertConversation(
                 ConversationEntity(
                     id = convId,
-                    title = "Getting Started with NOVA",
+                    title = "Getting Started with Spark",
                     createdAt = System.currentTimeMillis(),
                     updatedAt = System.currentTimeMillis()
                 )
@@ -167,7 +138,7 @@ class NovaRepository(
                     id = UUID.randomUUID().toString(),
                     conversationId = convId,
                     sender = "assistant",
-                    content = "Welcome to **NOVA Workspace**.\n\nI am your native autonomous AI assistant. Here is what you can do:\n\n- **Chat**: Discuss ideas and plan tasks with full Markdown support.\n- **Browser**: Browse the web with embedded tabs, or let the agent research and navigate with manual take-control safeguards.\n- **Files**: Access, edit, and organize files in your local workspace sandbox.\n- **Tasks**: Inspect live agent execution, tool calls, and approval requests.\n- **Secret Vault**: Store passwords and API keys encrypted with Android Keystore with origin-scoped autofill.\n\nType a request below or ask me to research something in the browser!",
+                    content = "Welcome to **Spark**.\n\nI am your native autonomous AI assistant. Here is what you can do:\n\n- **Chat**: Discuss ideas, ask questions, or run autonomous action tasks.\n- **Browser**: Browse the web with embedded tabs, or let the agent research and navigate with manual take-control safeguards.\n- **Files**: Access, edit, and organize files in your local workspace sandbox.\n- **Tasks**: Inspect live agent execution, tool calls, and approval records.\n- **Secret Vault**: Store passwords and API keys encrypted with Android Keystore.\n\nType a request below or ask me a question!",
                     timestamp = System.currentTimeMillis()
                 )
             )
@@ -213,6 +184,110 @@ class NovaRepository(
         )
         chatDao.insertConversation(conv)
         return conv
+    }
+
+    /**
+     * Returns a human-readable reason when no REAL AI provider is usable —
+     * either none is configured (the factory falls back to the scripted
+     * FakeAIProvider) or the configured provider's settings are incomplete.
+     * Restored from the fix round (5883560): the FakeAIProvider's canned
+     * replies must never be presented as model answers.
+     */
+    suspend fun providerUnavailableReason(): String? {
+        val provider = getActiveProvider()
+        if (provider is FakeAIProvider) {
+            val type = settingsDao.getSetting("ai_provider_type")?.lowercase()
+            return if (type == "fake" || type == "offline" || type == "mock") {
+                "Offline demo mode is selected — it does not run a real AI model and its scripted replies are not shown as answers."
+            } else {
+                "No AI provider is configured yet."
+            }
+        }
+        val validation = provider.validateConfiguration()
+        return if (validation.isValid) null else (validation.errorMessage ?: "The configured provider is incomplete.")
+    }
+
+    /**
+     * Chat routing logic (classification rules live in [ChatIntent], restored
+     * from the fix round — questions and greetings are chat even when they
+     * mention an action, and Roman Urdu imperatives count as actions):
+     * - Greetings & Questions: Answered by provider WITHOUT creating a task.
+     * - Action Requests: Creates an AgentTask.
+     * When no real provider is usable, an honestly labelled system notice is
+     * stored instead of any canned reply and no task is launched.
+     */
+    fun handleUserChatMessage(
+        conversationId: String,
+        userPrompt: String,
+        attachedFiles: List<String> = emptyList()
+    ) {
+        val cleanPrompt = userPrompt.trim()
+        if (cleanPrompt.isBlank()) return
+
+        val promptWithContext = if (attachedFiles.isNotEmpty()) {
+            "$cleanPrompt\n\n[Attached workspace files: ${attachedFiles.joinToString(", ")}]"
+        } else {
+            cleanPrompt
+        }
+
+        scope.launch {
+            val unavailable = providerUnavailableReason()
+            if (unavailable != null) {
+                chatDao.insertMessage(
+                    ChatMessageEntity(
+                        id = UUID.randomUUID().toString(),
+                        conversationId = conversationId,
+                        sender = "assistant",
+                        content = "⚠️ **System notice — not an AI reply.** $unavailable Add your Base URL and API key in **Settings → AI Engine**, then try again.",
+                        timestamp = System.currentTimeMillis()
+                    )
+                )
+                return@launch
+            }
+
+            if (ChatIntent.isActionRequest(cleanPrompt)) {
+                launchTask(promptWithContext, title = cleanPrompt.take(30), conversationId = conversationId)
+            } else {
+                // Direct Q&A routing - no task created!
+                pipelinePresence.value = PipelinePresence.COMPOSING
+                try {
+                    val provider = getActiveProvider()
+                    val sysContext = contextBuilder.buildSystemContext()
+                    val response = provider.sendMessage(
+                        messages = listOf(sysContext, AIMessage(role = "user", content = promptWithContext)),
+                        tools = emptyList()
+                    )
+                    pipelinePresence.value = PipelinePresence.RESPONDING
+                    val answerText = response.text.orEmpty().ifBlank { "I received your message." }
+
+                    chatDao.insertMessage(
+                        ChatMessageEntity(
+                            id = UUID.randomUUID().toString(),
+                            conversationId = conversationId,
+                            sender = "assistant",
+                            content = answerText,
+                            timestamp = System.currentTimeMillis()
+                        )
+                    )
+                } catch (e: Exception) {
+                    val isQuota = e.message?.contains("429") == true || e.message?.contains("quota", ignoreCase = true) == true
+                    if (isQuota) {
+                        pipelinePresence.value = PipelinePresence.PROVIDER_LIMIT_REACHED
+                    }
+                    chatDao.insertMessage(
+                        ChatMessageEntity(
+                            id = UUID.randomUUID().toString(),
+                            conversationId = conversationId,
+                            sender = "assistant",
+                            content = "Error answering request: ${e.message}",
+                            timestamp = System.currentTimeMillis()
+                        )
+                    )
+                } finally {
+                    pipelinePresence.value = PipelinePresence.READY
+                }
+            }
+        }
     }
 
     fun launchTask(prompt: String, title: String? = null, conversationId: String? = null): String {
@@ -262,6 +337,12 @@ class NovaRepository(
                 permissionManager.grantOneTime(toolName, domain, toolName)
             }
 
+            // Update pending approval record
+            val appRecord = approvalDao.getApprovalForTask(taskId)
+            if (appRecord != null && appRecord.status == "PENDING") {
+                approvalDao.updateApproval(appRecord.copy(status = "APPROVED", decidedAt = System.currentTimeMillis()))
+            }
+
             // Resume task
             val updated = task.copy(
                 status = "RUNNING",
@@ -283,6 +364,13 @@ class NovaRepository(
     fun rejectTask(taskId: String) {
         scope.launch {
             val task = taskDao.getTaskById(taskId) ?: return@launch
+
+            // Update pending approval record
+            val appRecord = approvalDao.getApprovalForTask(taskId)
+            if (appRecord != null && appRecord.status == "PENDING") {
+                approvalDao.updateApproval(appRecord.copy(status = "DENIED", decidedAt = System.currentTimeMillis()))
+            }
+
             val updated = task.copy(
                 status = "CANCELLED",
                 currentOperation = "Action rejected by user.",
@@ -330,7 +418,6 @@ class NovaRepository(
 
     suspend fun clearAllData() {
         browserDao.clearHistory()
-        // Delete all tasks, messages, conversations
         val convs = chatDao.getAllConversations().firstOrNull() ?: emptyList()
         for (c in convs) {
             chatDao.deleteMessagesForConversation(c.id)

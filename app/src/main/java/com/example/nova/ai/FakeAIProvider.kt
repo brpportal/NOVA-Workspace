@@ -9,7 +9,7 @@ class FakeAIProvider(
     private val simulatedLatencyMs: Long = 200
 ) : AIProviderAdapter {
     override val providerId: String = "fake_local"
-    override val displayName: String = "NOVA Autonomous Offline Engine (Local)"
+    override val displayName: String = "Spark Autonomous Offline Engine (Local)"
 
     var plannedToolCalls: MutableList<AIToolCall> = mutableListOf()
     var customResponseText: String? = null
@@ -67,14 +67,14 @@ class FakeAIProvider(
                     AIToolCall(
                         id = UUID.randomUUID().toString(),
                         name = "file_write",
-                        argumentsJson = """{"path":"Projects/ProjectPlan.md","content":"# Autonomous Project Plan\n\nCreated safely by NOVA Workspace."}"""
+                        argumentsJson = """{"path":"Projects/ProjectPlan.md","content":"# Autonomous Project Plan\n\nCreated safely by Spark Workspace."}"""
                     )
                 ),
                 finishReason = "tool_calls"
             )
         }
 
-        val responseText = customResponseText ?: "NOVA Workspace agent received your request: '$lastUserMessage'. All systems (browser, files, vault, tasks) are fully operational and secured."
+        val responseText = customResponseText ?: "Spark Agent received your request: '$lastUserMessage'. All systems (browser, files, vault, tasks) are fully operational and secured."
         return AIResponse(text = responseText, toolCalls = emptyList(), finishReason = "stop")
     }
 

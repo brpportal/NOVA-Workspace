@@ -7,13 +7,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Outcome of an Environment pack install (see [WorkspaceManager.installEnvironment]). */
-data class EnvironmentInstallResult(
-    val installedFiles: List<String>,
-    val templateCopies: List<String>,
-    val markerWritten: Boolean
-)
-
 class WorkspaceManager(
     val rootDir: File
 ) {
@@ -31,62 +24,64 @@ class WorkspaceManager(
             "AI-Tasks"
         )
 
-        /** Marker file written into the workspace root once the Environment pack is installed. */
-        const val ENVIRONMENT_MARKER = ".environment-installed"
-
-        /** Files of the bundled Environment pack (assets/environment/). */
-        val ENVIRONMENT_FILES = listOf(
-            "AGENT.md",
-            "BROWSER.md",
-            "SAFETY.md",
-            "TASK_TEMPLATE.md",
-            "Memory.md",
-            "Training.md"
+        /**
+         * The bundled Environment pack: workspace-relative path -> file content.
+         * Single source of truth for Install Environment (fix-round-2 pack,
+         * Spark-branded contents from the AI Studio upgrade).
+         */
+        val BUNDLED_ENVIRONMENT_FILES: Map<String, String> = mapOf(
+            "AGENT.md" to """# Spark Agent System Profile
+|
+|You are Spark, an autonomous AI workspace agent operating natively on an Android device.
+|Your core capabilities include file management, browser navigation, task execution, and vault access.
+|Always report progress clearly, respect permissions, and persist results to workspace files.
+""".trimMargin(),
+            "BROWSER.md" to """# Browser Automation Policy
+|
+|1. Use Set-of-Marks visual element tags to locate buttons and inputs.
+|2. Handle cookie dialogs gracefully.
+|3. Stop automation and request 'Take Control' when encountering CAPTCHAs, 2FA, or login forms.
+""".trimMargin(),
+            "SAFETY.md" to """# Safety & Permission Guardrails
+|
+|1. All destructive actions require approval unless permission mode is ALWAYS_ALLOW.
+|2. Secrets in arguments must always be redacted in logs and audit trails.
+""".trimMargin(),
+            "TASK_TEMPLATE.md" to """# Task Template
+|
+|## Goal
+|[Short summary of goal]
+|
+|## Steps
+|1. [Step 1]
+|2. [Step 2]
+""".trimMargin(),
+            "Memory/Memory.md" to """# Personal AI Memory
+|
+|*Persistent facts, user preferences, and important context for Spark Agent.*
+|
+|## User Profile
+|- Primary focus: High-productivity native Android AI automation
+|- Preferred communication style: Concise, direct, actionable
+""".trimMargin(),
+            "Memory/Training.md" to """# AI Agent Training & Procedures
+|
+|*Step-by-step procedures, taught user workflows, and behavioral rules.*
+""".trimMargin()
         )
 
-        /**
-         * Measured total size of the bundled Environment pack in bytes.
-         * Measured 2026-10-28 from app/src/main/assets/environment/
-         * (AGENT 1698 + BROWSER 1851 + SAFETY 1548 + TASK_TEMPLATE 687 +
-         * Memory 887 + Training 1268 = 7,939 bytes). If the pack changes,
-         * re-measure and update this number — the Files UI displays it.
-         */
-        const val ENVIRONMENT_PACK_BYTES: Long = 7939L
+        /** Workspace-relative paths the Environment pack installs. */
+        val ENVIRONMENT_FILES: List<String> = BUNDLED_ENVIRONMENT_FILES.keys.toList()
+
+        /** Marker file written once the Environment pack has been installed. */
+        const val ENVIRONMENT_MARKER = ".environment-installed"
+
+        /** Exact UTF-8 byte total of the pack contents — computed from the map, never hand-written. */
+        val ENVIRONMENT_PACK_BYTES: Long =
+            BUNDLED_ENVIRONMENT_FILES.values.sumOf { it.toByteArray(Charsets.UTF_8).size.toLong() }
 
         fun environmentPackSizeLabel(): String =
             String.format(Locale.US, "%.3f MB", ENVIRONMENT_PACK_BYTES / 1_000_000.0)
-
-        const val WORKSPACE_README = """# NOVA Workspace
-
-This is your on-device workspace. Everything here lives only on your phone,
-inside the app's private storage.
-
-## Layout
-
-- **Projects/** — project work and artifacts
-- **Research/** — notes and extracted research findings
-- **Documents/** — your notes, reports and markdown files (see Welcome.md)
-- **Images/** — screenshots and visual media
-- **Code/** — scripts and technical files
-- **Downloads/** — files downloaded through the embedded browser
-- **Memory/** — Memory.md (facts about you) and Training.md (agent procedures);
-  the agent reads both before every task
-- **Tasks/** — task scratch space
-- **AI-Tasks/** — one folder per agent task run (task.md, log.txt,
-  screenshots) plus the master index.md
-- **Exports/** — generated CSVs, summaries and backups
-- **Environment/** — the bundled agent Environment pack (AGENT.md,
-  BROWSER.md, SAFETY.md, TASK_TEMPLATE.md and the Memory/Training starter
-  templates), installed from the Files tab via "Install Environment"
-
-## Rules
-
-- Files are never overwritten by seeding or by the Environment install:
-  if you edited a file, an incoming template is saved next to it as
-  `<name>.template.md` instead.
-- A hidden marker file `.environment-installed` records that the
-  Environment pack has been installed.
-"""
 
         fun createDefault(context: Context): WorkspaceManager {
             val base = File(context.filesDir, "workspace")
@@ -110,16 +105,11 @@ inside the app's private storage.
                 dir.mkdirs()
             }
         }
-        // Workspace root README explaining the layout (never overwrites edits)
-        val rootReadme = File(rootDir, "README.md")
-        if (!rootReadme.exists()) {
-            rootReadme.writeText(WORKSPACE_README)
-        }
         // Write initial welcome README if empty
         val readme = File(rootDir, "Documents/Welcome.md")
         if (!readme.exists()) {
             readme.writeText(
-                """# Welcome to NOVA Workspace
+                """# Welcome to Spark
                 |
                 |Your standalone native AI workspace is ready.
                 |All files in this workspace are stored locally on your device.
@@ -157,7 +147,7 @@ inside the app's private storage.
                 |- Allowed sites: github.com, news.ycombinator.com, wikipedia.org, google.com
                 |
                 |## Key Project Notes
-                |- NOVA Workspace uses Android Keystore encryption for all credentials.
+                |- Spark uses Android Keystore encryption for all credentials.
                 |- Vision models are preferred for browser navigation tasks.
                 """.trimMargin()
             )
@@ -197,79 +187,13 @@ inside the app's private storage.
             indexFile.writeText(
                 """# AI Tasks Master Index
                 |
-                |Index of all autonomous agent tasks executed within NOVA Workspace.
+                |Index of all autonomous agent tasks executed within Spark.
                 |
                 || Date | Task Name | Status | Summary | Folder |
                 || --- | --- | --- | --- | --- |
                 """.trimMargin()
             )
         }
-    }
-
-    // --- ENVIRONMENT PACK ---
-
-    fun isEnvironmentInstalled(): Boolean = File(rootDir, ENVIRONMENT_MARKER).exists()
-
-    /**
-     * Installs the bundled Environment pack (assets/environment/) into the
-     * workspace. This is a purely local asset copy — it works fully offline.
-     *
-     * Safe-overwrite rule: a file is copied only when the destination does
-     * not exist or is byte-identical. When the user has edited the live
-     * Memory.md / Training.md, the incoming template is saved alongside as
-     * `<name>.template.md` instead of overwriting their content.
-     */
-    fun installEnvironment(context: Context): EnvironmentInstallResult {
-        initializeDefaultStructure()
-        val installed = mutableListOf<String>()
-        val templateCopies = mutableListOf<String>()
-
-        // 1) Full pack into Environment/
-        val envDir = File(rootDir, "Environment")
-        if (!envDir.exists()) envDir.mkdirs()
-        for (name in ENVIRONMENT_FILES) {
-            val bytes = context.assets.open("environment/$name").use { it.readBytes() }
-            val dest = File(envDir, name)
-            if (!dest.exists()) {
-                dest.writeBytes(bytes)
-                installed.add("Environment/$name")
-            }
-        }
-
-        // 2) Memory.md / Training.md templates refresh the live Memory files
-        //    only when untouched; otherwise they land as .template.md copies.
-        for (name in listOf("Memory.md", "Training.md")) {
-            val bytes = context.assets.open("environment/$name").use { it.readBytes() }
-            val live = File(rootDir, "Memory/$name")
-            live.parentFile?.mkdirs()
-            when {
-                !live.exists() -> {
-                    live.writeBytes(bytes)
-                    installed.add("Memory/$name")
-                }
-                live.readBytes().contentEquals(bytes) -> Unit // already up to date
-                else -> {
-                    val templateCopy = File(rootDir, "Memory/${name.removeSuffix(".md")}.template.md")
-                    if (!templateCopy.exists() || !templateCopy.readBytes().contentEquals(bytes)) {
-                        templateCopy.writeBytes(bytes)
-                        templateCopies.add("Memory/${templateCopy.name}")
-                    }
-                }
-            }
-        }
-
-        // 3) Marker file
-        val marker = File(rootDir, ENVIRONMENT_MARKER)
-        marker.writeText(
-            "installed_at=${System.currentTimeMillis()}\npack_bytes=$ENVIRONMENT_PACK_BYTES\nfiles=${ENVIRONMENT_FILES.joinToString(",")}\n",
-            Charsets.UTF_8
-        )
-
-        return EnvironmentInstallResult(
-            installedFiles = installed,
-            templateCopies = templateCopies,
-            markerWritten = marker.exists()
-        )
     }
 
     fun resolve(relativePath: String): File {
@@ -595,5 +519,27 @@ inside the app's private storage.
         backup.copyTo(target, overwrite = true)
         return true
     }
-}
 
+    fun getEnvironmentPackSize(): String = environmentPackSizeLabel()
+
+    fun isEnvironmentInstalled(): Boolean = File(rootDir, ENVIRONMENT_MARKER).exists()
+
+    fun installEnvironmentPack(): Int {
+        var installedCount = 0
+        val defaults = getBundledEnvironmentFiles()
+        defaults.forEach { (relPath, content) ->
+            val target = resolve(relPath)
+            if (!target.exists()) {
+                target.parentFile?.mkdirs()
+                target.writeText(content, Charsets.UTF_8)
+                installedCount++
+            }
+        }
+        File(rootDir, ENVIRONMENT_MARKER).writeText(
+            "installed_at=${System.currentTimeMillis()}\nfiles=${ENVIRONMENT_FILES.joinToString(",")}\n"
+        )
+        return installedCount
+    }
+
+    private fun getBundledEnvironmentFiles(): Map<String, String> = BUNDLED_ENVIRONMENT_FILES
+}

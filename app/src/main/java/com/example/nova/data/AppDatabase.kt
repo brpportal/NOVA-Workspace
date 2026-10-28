@@ -18,7 +18,8 @@ import androidx.room.RoomDatabase
         MemoryEntryEntity::class,
         SecretMetadataEntity::class,
         PermissionRuleEntity::class,
-        AppSettingsEntity::class
+        AppSettingsEntity::class,
+        ApprovalRecordEntity::class
     ],
     version = 1,
     exportSchema = false
@@ -31,6 +32,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun secretDao(): SecretDao
     abstract fun permissionDao(): PermissionDao
     abstract fun settingsDao(): SettingsDao
+    abstract fun approvalDao(): ApprovalDao
 
     companion object {
         @Volatile

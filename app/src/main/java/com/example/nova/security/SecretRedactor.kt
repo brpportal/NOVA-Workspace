@@ -31,6 +31,17 @@ object SecretRedactor {
     }
 
     /**
+     * Redacts common sensitive JSON key values in argument strings.
+     */
+    fun redactSecrets(json: String): String {
+        if (json.isBlank()) return json
+        return json.replace(Regex("(?i)\"(password|key|secret|token|api_key|credential)\"\\s*:\\s*\"[^\"]+\"")) { match ->
+            val key = match.groupValues[1]
+            "\"$key\":\"[REDACTED]\""
+        }
+    }
+
+    /**
      * Creates a security audit line without ever exposing the sensitive payload.
      */
     fun auditEntry(action: String, secretName: String, domain: String?, success: Boolean): String {

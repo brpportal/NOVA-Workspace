@@ -35,7 +35,7 @@ class ContextBuilder(
         val estimatedTokens = (memoryMd.length + trainingMd.length + pastTasksSummary.length + 1500) / 4
 
         val prompt = """
-            You are NOVA Agent, an autonomous native Android assistant running inside NOVA Workspace.
+            You are Spark Agent, an autonomous native Android assistant running inside Spark Workspace.
             
             SECURITY DIRECTIVES & BOUNDARIES:
             1. You have access to the local Workspace directory (Folders: Projects/, Research/, Documents/, Images/, Code/, Downloads/, Memory/, AI-Tasks/, Exports/).

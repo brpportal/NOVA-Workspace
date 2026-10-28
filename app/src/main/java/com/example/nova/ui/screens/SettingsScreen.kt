@@ -73,8 +73,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -88,6 +86,7 @@ import com.example.nova.ai.ConnectionResult
 import com.example.nova.ai.OpenAICompatibleProvider
 import com.example.nova.ai.ProviderProfile
 import com.example.nova.data.AppSettingsEntity
+import com.example.nova.data.MemoryEntryEntity
 import com.example.nova.data.NovaRepository
 import com.example.nova.security.PermissionMode
 import com.example.nova.ui.components.MarkdownText
@@ -108,7 +107,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun SettingsScreen(
     repository: NovaRepository,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onNavigateToApprovals: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -133,20 +133,10 @@ fun SettingsScreen(
 
     // Fetch models state
     var isFetchingModels by remember { mutableStateOf(false) }
+    var hasFetchedModels by remember { mutableStateOf(false) }
     var fetchedModels by remember { mutableStateOf<List<String>>(emptyList()) }
     var fetchModelsError by remember { mutableStateOf<String?>(null) }
-    var fetchModelsInfo by remember { mutableStateOf<String?>(null) }
     var modelSearchQuery by remember { mutableStateOf("") }
-    val modelFocusRequester = remember { FocusRequester() }
-    var requestModelFocus by remember { mutableStateOf(false) }
-
-    // When the provider returns 0 models, guide the user to the manual field.
-    LaunchedEffect(requestModelFocus) {
-        if (requestModelFocus) {
-            try { modelFocusRequester.requestFocus() } catch (e: Exception) { }
-            requestModelFocus = false
-        }
-    }
 
     // --- 2. MEMORY & TRAINING STATE ---
     var activeMemoryTab by remember { mutableIntStateOf(0) } // 0: Memory.md, 1: Training.md
@@ -158,6 +148,8 @@ fun SettingsScreen(
     var backupList by remember { mutableStateOf<List<String>>(emptyList()) }
     var showProposedDiffDialog by remember { mutableStateOf(false) }
     var proposedAdditionText by remember { mutableStateOf("") }
+    var showAddMemoryDialog by remember { mutableStateOf(false) }
+    var newMemoryTextInput by remember { mutableStateOf("") }
 
     // --- 3. SECRET VAULT STATE ---
     var showAddSecretDialog by remember { mutableStateOf(false) }
@@ -200,6 +192,13 @@ fun SettingsScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Settings & Vault", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)) },
+                actions = {
+                    TextButton(onClick = onNavigateToApprovals, modifier = Modifier.testTag("settings_approvals_history_button")) {
+                        Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Approvals", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
             )
         },
@@ -360,35 +359,13 @@ fun SettingsScreen(
                                         onClick = {
                                             isFetchingModels = true
                                             fetchModelsError = null
-                                            fetchModelsInfo = null
+                                            hasFetchedModels = false
                                             scope.launch {
                                                 try {
-                                                    when (val result = OpenAICompatibleProvider.fetchModelsDetailed(baseUrlInput, apiKeyInput)) {
-                                                        is com.example.nova.ai.FetchModelsResult.Success -> {
-                                                            fetchedModels = result.models
-                                                            Toast.makeText(context, "Loaded ${result.models.size} models", Toast.LENGTH_SHORT).show()
-                                                        }
-                                                        is com.example.nova.ai.FetchModelsResult.Empty -> {
-                                                            // HTTP 200 with an empty list is NOT an error:
-                                                            // the provider/plan simply exposes no models.
-                                                            fetchedModels = emptyList()
-                                                            fetchModelsInfo = "Provider returned 0 models. You can type a model name manually below."
-                                                            requestModelFocus = true
-                                                        }
-                                                        is com.example.nova.ai.FetchModelsResult.HttpError -> {
-                                                            fetchedModels = emptyList()
-                                                            fetchModelsError = "HTTP ${result.code}: ${result.reason}"
-                                                        }
-                                                        is com.example.nova.ai.FetchModelsResult.Malformed -> {
-                                                            fetchedModels = emptyList()
-                                                            fetchModelsError = "Could not read the models list — the response was not valid JSON. You can type a model name manually below."
-                                                            requestModelFocus = true
-                                                        }
-                                                        is com.example.nova.ai.FetchModelsResult.NetworkError -> {
-                                                            fetchedModels = emptyList()
-                                                            fetchModelsError = result.message
-                                                        }
-                                                    }
+                                                    val models = OpenAICompatibleProvider.fetchModels(baseUrlInput, apiKeyInput)
+                                                    fetchedModels = models
+                                                    hasFetchedModels = true
+                                                    Toast.makeText(context, "Loaded ${models.size} models", Toast.LENGTH_SHORT).show()
                                                 } catch (e: Exception) {
                                                     fetchModelsError = e.message
                                                 } finally {
@@ -426,13 +403,17 @@ fun SettingsScreen(
                                     }
                                 }
 
-                                if (fetchModelsInfo != null) {
+                                if (hasFetchedModels && fetchedModels.isEmpty() && fetchModelsError == null) {
                                     Surface(
-                                        color = WarmWarning.copy(alpha = 0.12f),
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
                                         shape = RoundedCornerShape(10.dp),
-                                        modifier = Modifier.fillMaxWidth().testTag("fetch_models_info")
+                                        modifier = Modifier.fillMaxWidth().testTag("zero_models_info_card")
                                     ) {
-                                        Text(fetchModelsInfo!!, color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, modifier = Modifier.padding(8.dp))
+                                        Text(
+                                            "Provider returned 0 models. You can type a model name manually below.",
+                                            style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted),
+                                            modifier = Modifier.padding(10.dp)
+                                        )
                                     }
                                 }
 
@@ -482,12 +463,10 @@ fun SettingsScreen(
                                             repository.settingsDao.setSetting(AppSettingsEntity("ai_model", it))
                                         }
                                     },
-                                    label = { Text("Active Model (type manually or pick from fetched list)") },
+                                    label = { Text("Active Model") },
                                     singleLine = true,
                                     shape = RoundedCornerShape(12.dp),
-                                    modifier = Modifier.fillMaxWidth()
-                                        .focusRequester(modelFocusRequester)
-                                        .testTag("model_name_input_field")
+                                    modifier = Modifier.fillMaxWidth().testTag("model_name_input_field")
                                 )
 
                                 // Vision Capability Switch
@@ -656,22 +635,41 @@ fun SettingsScreen(
                                     }
                                 }
 
-                                // Propose additions simulator / trigger
-                                OutlinedButton(
-                                    onClick = {
-                                        proposedAdditionText = if (activeMemoryTab == 0) {
-                                            "- New verified fact: User preferred OpenAI-compatible endpoints with Groq acceleration."
-                                        } else {
-                                            "### Learned Workflow: Auto-search\n1. Navigate to target URL\n2. Fill query and extract summary."
-                                        }
-                                        showProposedDiffDialog = true
-                                    },
-                                    shape = RoundedCornerShape(16.dp),
-                                    modifier = Modifier.fillMaxWidth()
+                                // Add memory & Propose learning action row
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = WarmAccent, modifier = Modifier.size(16.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Simulate AI Propose Learning", fontSize = 12.sp)
+                                    Button(
+                                        onClick = {
+                                            newMemoryTextInput = ""
+                                            showAddMemoryDialog = true
+                                        },
+                                        shape = RoundedCornerShape(16.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                        modifier = Modifier.weight(1f).testTag("add_memory_button")
+                                    ) {
+                                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Add memory", fontSize = 12.sp)
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = {
+                                            proposedAdditionText = if (activeMemoryTab == 0) {
+                                                "- New verified fact: User preferred OpenAI-compatible endpoints with Groq acceleration."
+                                            } else {
+                                                "### Learned Workflow: Auto-search\n1. Navigate to target URL\n2. Fill query and extract summary."
+                                            }
+                                            showProposedDiffDialog = true
+                                        },
+                                        shape = RoundedCornerShape(16.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = WarmAccent, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("AI Propose", fontSize = 12.sp)
+                                    }
                                 }
                             }
                         }
@@ -953,6 +951,56 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showResetConfirmDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // Add Memory Dialog
+    if (showAddMemoryDialog) {
+        AlertDialog(
+            onDismissRequest = { showAddMemoryDialog = false },
+            title = { Text("Add Memory Entry") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Appends a new dated fact or preference entry to Memory.md", fontSize = 12.sp, color = StoneMuted)
+                    OutlinedTextField(
+                        value = newMemoryTextInput,
+                        onValueChange = { newMemoryTextInput = it },
+                        label = { Text("Memory text") },
+                        placeholder = { Text("e.g. User prefers concise bullet summaries.") },
+                        modifier = Modifier.fillMaxWidth().testTag("add_memory_input"),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val entry = newMemoryTextInput.trim()
+                        if (entry.isNotBlank()) {
+                            scope.launch {
+                                val dateStr = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date())
+                                val formatted = "- [$dateStr] $entry"
+                                wm.appendFile("Memory/Memory.md", "\n$formatted")
+                                repository.memoryDao.insertMemory(
+                                    MemoryEntryEntity(
+                                        key = "manual_memory_${System.currentTimeMillis()}",
+                                        content = entry,
+                                        category = "user_preference"
+                                    )
+                                )
+                                memoryContent = try { wm.readFile("Memory/Memory.md") } catch (e: Exception) { "" }
+                                showAddMemoryDialog = false
+                                Toast.makeText(context, "Memory added", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) { Text("Save Memory") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddMemoryDialog = false }) { Text("Cancel") }
             }
         )
     }

@@ -81,13 +81,19 @@ import com.example.ui.theme.WarmAccent
 import com.example.ui.theme.WarmAccentContainer
 import com.example.ui.theme.WarmAccentDark
 import com.example.ui.theme.WarmBorder
-import com.example.ui.theme.WarmCanvas
 import com.example.ui.theme.WarmError
-import com.example.ui.theme.WarmOffWhite
-import com.example.ui.theme.WarmSurface
+import com.example.ui.theme.WarmSuccess
 import com.example.ui.theme.WarmWarning
 import kotlinx.coroutines.launch
 import java.util.UUID
+
+import com.example.nova.agent.PipelinePresence
+import com.example.nova.ai.AIMessage
+import com.example.nova.data.MemoryEntryEntity
+import androidx.compose.material.icons.filled.Psychology
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -100,6 +106,7 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val conversations by repository.conversations.collectAsState(initial = emptyList())
     val activeTasks by repository.tasks.collectAsState(initial = emptyList())
+    val presence by repository.pipelinePresence.collectAsState()
 
     var activeConversationId by remember { mutableStateOf<String?>(null) }
     var inputText by remember { mutableStateOf("") }
@@ -108,6 +115,11 @@ fun ChatScreen(
     var attachedFilePaths by remember { mutableStateOf(listOf<String>()) }
     var showRenameDialog by remember { mutableStateOf<ConversationEntity?>(null) }
     var renameTitleInput by remember { mutableStateOf("") }
+
+    // Summarize Into Memory state
+    var showSummarizeDialog by remember { mutableStateOf(false) }
+    var isSummarizingMemory by remember { mutableStateOf(false) }
+    var proposedMemorySummary by remember { mutableStateOf("") }
 
     // Select first conversation if none selected
     LaunchedEffect(conversations) {
@@ -140,11 +152,18 @@ fun ChatScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text(
-                            text = currentConversation?.title ?: "NOVA Chat",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface),
-                            maxLines = 1
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = currentConversation?.title ?: "Spark Chat",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface),
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            // Presence Indicator Badge
+                            PresenceBadge(presence = presence)
+                        }
+
                         if (runningTask != null) {
                             Text(
                                 text = runningTask.currentOperation,
@@ -163,6 +182,39 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    // Summarize into memory action
+                    IconButton(
+                        onClick = {
+                            scope.launch {
+                                if (messages.isEmpty()) {
+                                    Toast.makeText(context, "No messages in this chat to summarize", Toast.LENGTH_SHORT).show()
+                                    return@launch
+                                }
+                                isSummarizingMemory = true
+                                try {
+                                    val provider = repository.getActiveProvider()
+                                    val conversationText = messages.joinToString("\n") { "${it.sender}: ${it.content}" }
+                                    val prompt = "Extract durable facts, user preferences, and key context from this conversation into concise markdown bullet points. Do NOT copy verbatim messages. Return ONLY the bullet points:\n\n$conversationText"
+                                    val response = provider.sendMessage(listOf(AIMessage(role = "user", content = prompt)), emptyList())
+                                    proposedMemorySummary = response.text.orEmpty().ifBlank { "- User preference logged from conversation" }
+                                    showSummarizeDialog = true
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Summarize failed: ${e.message}", Toast.LENGTH_LONG).show()
+                                } finally {
+                                    isSummarizingMemory = false
+                                }
+                            }
+                        },
+                        enabled = !isSummarizingMemory,
+                        modifier = Modifier.testTag("summarize_into_memory_button")
+                    ) {
+                        if (isSummarizingMemory) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Default.Psychology, contentDescription = "Summarize into memory", tint = WarmAccent)
+                        }
+                    }
+
                     IconButton(
                         onClick = {
                             scope.launch {
@@ -295,7 +347,7 @@ fun ChatScreen(
                                 }
                                 Spacer(modifier = Modifier.height(14.dp))
                                 Text(
-                                    text = "How can NOVA help today?",
+                                    text = "How can Spark help today?",
                                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
@@ -405,7 +457,7 @@ fun ChatScreen(
                         OutlinedTextField(
                             value = inputText,
                             onValueChange = { inputText = it },
-                            placeholder = { Text("Ask NOVA or type a task...", fontSize = 14.sp, color = StoneLight) },
+                            placeholder = { Text("Ask Spark or type a task...", fontSize = 14.sp, color = StoneLight) },
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("chat_input_field"),
@@ -421,7 +473,7 @@ fun ChatScreen(
                             )
                         )
 
-                        val canSend = inputText.isNotBlank()
+                        val canSend = inputText.isNotBlank() && runningTask == null
                         IconButton(
                             onClick = {
                                 if (canSend) {
@@ -431,8 +483,8 @@ fun ChatScreen(
                                     val attached = attachedFilePaths
                                     attachedFilePaths = emptyList()
 
+                                    // Save user message
                                     scope.launch {
-                                        // Save user message
                                         repository.chatDao.insertMessage(
                                             ChatMessageEntity(
                                                 id = UUID.randomUUID().toString(),
@@ -443,50 +495,7 @@ fun ChatScreen(
                                                 timestamp = System.currentTimeMillis()
                                             )
                                         )
-
-                                        val promptWithContext = if (attached.isNotEmpty()) {
-                                            "$text\n\n[Attached workspace files: ${attached.joinToString(", ")}]"
-                                        } else {
-                                            text
-                                        }
-
-                                        // Routing rule (see ChatIntent): plain conversation is
-                                        // answered by the configured provider and NEVER creates
-                                        // a task; only clear action requests launch the agent.
-                                        if (com.example.nova.agent.ChatIntent.isActionRequest(text)) {
-                                            val unavailable = repository.providerUnavailableReason()
-                                            when {
-                                                unavailable != null -> {
-                                                    repository.chatDao.insertMessage(
-                                                        ChatMessageEntity(
-                                                            id = UUID.randomUUID().toString(),
-                                                            conversationId = convId,
-                                                            sender = "system",
-                                                            content = "⚠️ **System notice — not an AI reply.** Agent tasks need a working AI provider. $unavailable Add your Base URL and API key in **Settings → AI Engine**.",
-                                                            timestamp = System.currentTimeMillis()
-                                                        )
-                                                    )
-                                                }
-                                                runningTask != null -> {
-                                                    repository.chatDao.insertMessage(
-                                                        ChatMessageEntity(
-                                                            id = UUID.randomUUID().toString(),
-                                                            conversationId = convId,
-                                                            sender = "system",
-                                                            content = "⚠️ An agent task is already running — follow it in the **Tasks** tab, or stop it before starting another.",
-                                                            timestamp = System.currentTimeMillis()
-                                                        )
-                                                    )
-                                                }
-                                                else -> repository.launchTask(
-                                                    prompt = promptWithContext,
-                                                    title = text.take(30),
-                                                    conversationId = convId
-                                                )
-                                            }
-                                        } else {
-                                            repository.sendChatReply(convId)
-                                        }
+                                        repository.handleUserChatMessage(convId, text, attached)
                                     }
                                 }
                             },
@@ -680,6 +689,55 @@ fun ChatScreen(
             }
         )
     }
+
+    // Summarize Into Memory Confirmation Dialog
+    if (showSummarizeDialog) {
+        AlertDialog(
+            onDismissRequest = { showSummarizeDialog = false },
+            title = { Text("Confirm Memory Summary") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("The AI extracted the following durable facts from your current conversation. Confirm or edit before appending to Memory.md:", style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted))
+                    OutlinedTextField(
+                        value = proposedMemorySummary,
+                        onValueChange = { proposedMemorySummary = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 12.sp)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            val timeStr = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())
+                            val formattedEntry = "\n\n### Chat Summary ($timeStr)\n$proposedMemorySummary"
+                            repository.workspaceManager.appendFile("Memory/Memory.md", formattedEntry)
+                            repository.memoryDao.insertMemory(
+                                MemoryEntryEntity(
+                                    id = UUID.randomUUID().toString(),
+                                    key = "summary_${System.currentTimeMillis()}",
+                                    content = proposedMemorySummary,
+                                    category = "user_preference"
+                                )
+                            )
+                            Toast.makeText(context, "Saved to Memory.md", Toast.LENGTH_SHORT).show()
+                            showSummarizeDialog = false
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text("Confirm & Save to Memory")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSummarizeDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
 }
 
 @Composable
@@ -718,7 +776,7 @@ fun ChatMessageItem(
             Column(modifier = Modifier.padding(14.dp)) {
                 // Header (sender indicator)
                 Text(
-                    text = if (isUser) "You" else "NOVA",
+                    text = if (isUser) "You" else "Spark",
                     style = MaterialTheme.typography.labelSmall.copy(
                         color = if (isUser) MaterialTheme.colorScheme.primary else StoneMuted,
                         fontWeight = FontWeight.Bold
@@ -741,3 +799,44 @@ fun ChatMessageItem(
         }
     }
 }
+
+@Composable
+fun PresenceBadge(presence: PipelinePresence) {
+    val (color, containerColor) = when (presence) {
+        PipelinePresence.READY -> Pair(WarmSuccess, WarmSuccess.copy(alpha = 0.15f))
+        PipelinePresence.WORKING -> Pair(WarmAccent, WarmAccentContainer)
+        PipelinePresence.COMPOSING -> Pair(WarmAccentDark, WarmAccentContainer)
+        PipelinePresence.RESPONDING -> Pair(WarmAccent, WarmAccentContainer)
+        PipelinePresence.MAKING_SOMETHING -> Pair(WarmAccent, WarmAccentContainer)
+        PipelinePresence.NEEDS_APPROVAL -> Pair(WarmWarning, WarmWarning.copy(alpha = 0.15f))
+        PipelinePresence.PROVIDER_LIMIT_REACHED -> Pair(WarmError, WarmError.copy(alpha = 0.15f))
+    }
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = containerColor,
+        border = androidx.compose.foundation.BorderStroke(0.5.dp, color.copy(alpha = 0.4f))
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(color)
+            )
+            Spacer(modifier = Modifier.width(5.dp))
+            Text(
+                text = presence.label,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = color
+                )
+            )
+        }
+    }
+}
+

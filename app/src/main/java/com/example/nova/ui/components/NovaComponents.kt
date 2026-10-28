@@ -267,67 +267,100 @@ fun LiveControlBanner(
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Status row: colored dot + state label + always-visible Stop
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    Box(
-                        modifier = Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(
-                                when {
-                                    isAgentActive -> WarmAccent
-                                    isManual -> WarmWarning
-                                    isPaused -> StoneLight
-                                    isWaiting -> WarmError
-                                    else -> WarmSuccess
-                                }
-                            )
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            text = when {
-                                isAgentActive -> "AI IS CONTROLLING"
-                                isManual -> "YOU ARE CONTROLLING"
-                                isPaused -> "SESSION PAUSED"
-                                isWaiting -> "WAITING FOR APPROVAL"
-                                else -> "STANDBY"
-                            },
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp,
-                                color = when {
-                                    isAgentActive -> WarmAccent
-                                    isManual -> WarmWarning
-                                    else -> MaterialTheme.colorScheme.onSurface
-                                }
-                            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(
+                            when {
+                                isAgentActive -> WarmAccent
+                                isManual -> WarmWarning
+                                isPaused -> StoneLight
+                                isWaiting -> WarmError
+                                else -> WarmSuccess
+                            }
                         )
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Column {
+                    Text(
+                        text = when {
+                            isAgentActive -> "AI IS CONTROLLING"
+                            isManual -> "You're in control"
+                            isPaused -> "SESSION PAUSED"
+                            isWaiting -> "Needs you"
+                            else -> "STANDBY"
+                        },
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            color = when {
+                                isAgentActive -> WarmAccent
+                                isManual -> WarmWarning
+                                isWaiting -> WarmError
+                                else -> MaterialTheme.colorScheme.onSurface
+                            }
+                        )
+                    )
+                    Text(
+                        text = when {
+                            isAgentActive -> "Vision automation active"
+                            isManual -> "Needs you: Manual input / CAPTCHA step"
+                            isPaused -> "Agent paused"
+                            isWaiting -> "Needs you: Pending approval"
+                            else -> "Human & AI co-pilot ready"
+                        },
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp, color = StoneLight)
+                    )
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (isAgentActive) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        border = BorderStroke(1.dp, WarmWarning.copy(alpha = 0.5f)),
+                        modifier = Modifier
+                            .clickable { onTakeOver() }
+                            .testTag("take_control_button")
+                    ) {
                         Text(
-                            text = when {
-                                isAgentActive -> "AI may act — agent tasks can drive the browser"
-                                isManual -> "You are controlling — AI browser actions are paused"
-                                isPaused -> "Agent paused — tap Control to AI to resume"
-                                isWaiting -> "Approval pending — review it in the Tasks tab"
-                                else -> "Standby — tap Control to AI to let the agent drive"
-                            },
-                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp, color = StoneLight)
+                            text = "Take control",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = WarmWarning,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                } else if (isManual) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        border = BorderStroke(1.dp, WarmAccent),
+                        modifier = Modifier
+                            .clickable { onReturnToAI() }
+                            .testTag("return_to_ai_button")
+                    ) {
+                        Text(
+                            text = "Hand back to the agent",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = WarmAccent,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                         )
                     }
                 }
 
-                // Big Red Emergency Stop Kill Switch — always visible
+                // Big Red Emergency Stop Kill Switch
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = WarmError.copy(alpha = 0.12f),
@@ -341,60 +374,7 @@ fun LiveControlBanner(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = WarmError,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                    )
-                }
-            }
-
-            // Control row: BOTH hand-over buttons are always visible.
-            // Take Control -> BrowserController.takeManualControl() (the agent
-            // loop pauses browser work while MANUAL_CONTROL is active).
-            // Control to AI -> BrowserController.returnToAI() (mode becomes
-            // AGENT_ACTIVE; the page state is re-read before the agent acts).
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = if (isManual) MaterialTheme.colorScheme.surfaceVariant else WarmWarning.copy(alpha = 0.14f),
-                    border = BorderStroke(1.dp, if (isManual) MaterialTheme.colorScheme.outline else WarmWarning.copy(alpha = 0.6f)),
-                    modifier = Modifier
-                        .weight(1f)
-                        .then(if (isManual) Modifier else Modifier.clickable { onTakeOver() })
-                        .testTag("take_control_button")
-                ) {
-                    Text(
-                        text = if (isManual) "You Have Control" else "✋ Take Control",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isManual) StoneLight else WarmWarning,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 9.dp)
-                    )
-                }
-
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = if (isAgentActive) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primaryContainer,
-                    border = BorderStroke(1.dp, if (isAgentActive) MaterialTheme.colorScheme.outline else WarmAccent),
-                    modifier = Modifier
-                        .weight(1f)
-                        .then(if (isAgentActive) Modifier else Modifier.clickable { onReturnToAI() })
-                        .testTag("return_to_ai_button")
-                ) {
-                    Text(
-                        text = if (isAgentActive) "AI Has Control" else "🤖 Control to AI",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isAgentActive) StoneLight else WarmAccent,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 9.dp)
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
                     )
                 }
             }

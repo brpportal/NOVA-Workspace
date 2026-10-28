@@ -1,6 +1,7 @@
 package com.example.nova.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,12 +18,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -60,29 +64,38 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.nova.data.AgentTaskEntity
+import com.example.nova.data.ApprovalRecordEntity
 import com.example.nova.data.NovaRepository
 import com.example.nova.data.TaskStepEntity
 import com.example.ui.theme.StoneLight
 import com.example.ui.theme.StoneMuted
 import com.example.ui.theme.WarmAccent
 import com.example.ui.theme.WarmAccentContainer
-import com.example.ui.theme.WarmBorder
-import com.example.ui.theme.WarmCanvas
 import com.example.ui.theme.WarmError
-import com.example.ui.theme.WarmOffWhite
 import com.example.ui.theme.WarmSuccess
-import com.example.ui.theme.WarmSurface
 import com.example.ui.theme.WarmWarning
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+data class AuditTimelineEvent(
+    val timestamp: Long,
+    val title: String,
+    val subtitle: String,
+    val detail: String? = null,
+    val status: String
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TasksScreen(
     repository: NovaRepository,
+    onNavigateToApprovals: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val tasks by repository.tasks.collectAsState(initial = emptyList())
     var selectedFilterIndex by remember { mutableIntStateOf(0) }
-    val filterTabs = listOf("All", "Active", "Waiting Approval", "Completed")
+    val filterTabs = listOf("All", "Active", "Needs Approval", "Completed")
 
     val filteredTasks = remember(tasks, selectedFilterIndex) {
         when (selectedFilterIndex) {
@@ -101,6 +114,27 @@ fun TasksScreen(
                         text = "Agent Tasks",
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                     )
+                },
+                actions = {
+                    IconButton(
+                        onClick = onNavigateToApprovals,
+                        modifier = Modifier.testTag("open_approvals_button")
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.VerifiedUser,
+                                    contentDescription = "Approval History",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
             )
@@ -186,7 +220,76 @@ fun TaskCardItem(
     repository: NovaRepository
 ) {
     val steps by repository.taskDao.getStepsForTask(task.id).collectAsState(initial = emptyList())
+    val approvals by repository.approvals.collectAsState(initial = emptyList())
+    val taskApprovals = remember(approvals, task.id) { approvals.filter { it.taskId == task.id } }
+
     var isExpanded by remember { mutableStateOf(false) }
+
+    // Build unified audit trail timeline
+    val auditEvents = remember(task, steps, taskApprovals) {
+        val list = mutableListOf<AuditTimelineEvent>()
+
+        // 1. Task Creation
+        list.add(
+            AuditTimelineEvent(
+                timestamp = task.createdAt,
+                title = "Task Created",
+                subtitle = "Goal: ${task.prompt}",
+                status = "CREATED"
+            )
+        )
+
+        // 2. Plan Steps
+        for (step in steps) {
+            list.add(
+                AuditTimelineEvent(
+                    timestamp = step.timestamp,
+                    title = "Step #${step.stepNumber}: ${step.toolName ?: "Execution"}",
+                    subtitle = "Executed ${step.toolName ?: "tool"}",
+                    detail = if (!step.argumentsJson.isNullOrBlank()) "Args: ${step.argumentsJson}\nResult: ${step.resultJson?.take(150)}" else step.resultJson?.take(150),
+                    status = step.status
+                )
+            )
+        }
+
+        // 3. Approval Events
+        for (app in taskApprovals) {
+            list.add(
+                AuditTimelineEvent(
+                    timestamp = app.createdAt,
+                    title = "Approval Requested: ${app.actionName}",
+                    subtitle = "Status: ${app.status}",
+                    detail = app.argumentsSummary,
+                    status = app.status
+                )
+            )
+            if (app.decidedAt != null) {
+                list.add(
+                    AuditTimelineEvent(
+                        timestamp = app.decidedAt,
+                        title = "Approval Decision: ${app.status}",
+                        subtitle = "Action '${app.actionName}' was ${app.status.lowercase()}",
+                        status = app.status
+                    )
+                )
+            }
+        }
+
+        // 4. Completion or Failure
+        if (task.status == "COMPLETED" || task.status == "FAILED" || task.status == "CANCELLED") {
+            list.add(
+                AuditTimelineEvent(
+                    timestamp = task.completedAt ?: task.updatedAt,
+                    title = "Task ${task.status}",
+                    subtitle = task.currentOperation,
+                    detail = task.errorMessage,
+                    status = task.status
+                )
+            )
+        }
+
+        list.sortedBy { it.timestamp }
+    }
 
     Card(
         shape = RoundedCornerShape(16.dp),
@@ -213,7 +316,7 @@ fun TaskCardItem(
                     modifier = Modifier.weight(1f),
                     maxLines = 1
                 )
-                StatusBadge(status = task.status)
+                TaskStatusBadge(status = task.status)
             }
 
             Spacer(modifier = Modifier.height(6.dp))
@@ -245,7 +348,7 @@ fun TaskCardItem(
                 Surface(
                     color = WarmWarning.copy(alpha = 0.08f),
                     shape = RoundedCornerShape(12.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, WarmWarning.copy(alpha = 0.5f)),
+                    border = BorderStroke(1.dp, WarmWarning.copy(alpha = 0.5f)),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
@@ -253,13 +356,13 @@ fun TaskCardItem(
                             Icon(Icons.Default.Warning, contentDescription = null, tint = WarmWarning, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Action Requires Approval",
+                                text = "Needs you: Action Requires Approval",
                                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = WarmWarning)
                             )
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "Tool: ${task.pendingApprovalToolName}\nArguments: ${task.pendingApprovalArgumentsJson}",
+                            text = task.pendingApprovalArgumentsJson ?: "Tool: ${task.pendingApprovalToolName}",
                             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
                         )
                         Spacer(modifier = Modifier.height(10.dp))
@@ -306,7 +409,7 @@ fun TaskCardItem(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Footer controls: Expand steps toggle & Actions
+            // Footer controls: Expand timeline toggle & Actions
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -321,13 +424,13 @@ fun TaskCardItem(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "${steps.size} step(s)",
+                            text = "Audit Trail (${auditEvents.size} events)",
                             style = MaterialTheme.typography.labelSmall.copy(color = StoneMuted, fontWeight = FontWeight.Medium)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Icon(
                             imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                            contentDescription = "Expand Steps",
+                            contentDescription = "Expand Audit Trail",
                             tint = StoneMuted,
                             modifier = Modifier.size(16.dp)
                         )
@@ -353,7 +456,7 @@ fun TaskCardItem(
                 }
             }
 
-            // Steps Timeline when expanded
+            // Unified Chronological Audit Trail Timeline when expanded
             AnimatedVisibility(visible = isExpanded) {
                 Column(
                     modifier = Modifier
@@ -361,8 +464,8 @@ fun TaskCardItem(
                         .padding(top = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    for (step in steps) {
-                        StepTimelineRow(step = step)
+                    for (event in auditEvents) {
+                        AuditTimelineRow(event = event)
                     }
                 }
             }
@@ -371,7 +474,10 @@ fun TaskCardItem(
 }
 
 @Composable
-fun StepTimelineRow(step: TaskStepEntity) {
+fun AuditTimelineRow(event: AuditTimelineEvent) {
+    val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    val timeStr = sdf.format(Date(event.timestamp))
+
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(10.dp),
@@ -380,33 +486,34 @@ fun StepTimelineRow(step: TaskStepEntity) {
         Column(modifier = Modifier.padding(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "#${step.stepNumber} ${step.toolName ?: "Step"}",
+                    text = "[$timeStr] ${event.title}",
                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 Text(
-                    text = step.status,
+                    text = event.status,
                     style = MaterialTheme.typography.labelSmall.copy(
-                        color = when (step.status) {
-                            "SUCCESS" -> WarmSuccess
-                            "FAILED" -> WarmError
+                        color = when (event.status) {
+                            "SUCCESS", "COMPLETED", "APPROVED" -> WarmSuccess
+                            "FAILED", "DENIED", "TIMED_OUT" -> WarmError
+                            "WAITING_APPROVAL" -> WarmWarning
                             else -> StoneMuted
                         },
                         fontWeight = FontWeight.Bold
                     )
                 )
             }
-            if (!step.argumentsJson.isNullOrBlank()) {
+            if (event.subtitle.isNotBlank()) {
                 Text(
-                    text = "Args: ${step.argumentsJson}",
-                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
+                    text = event.subtitle,
+                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
                 )
             }
-            if (!step.resultJson.isNullOrBlank()) {
+            if (!event.detail.isNullOrBlank()) {
                 Text(
-                    text = "Result: ${step.resultJson.take(200)}",
-                    style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted, fontSize = 11.sp),
-                    maxLines = 2
+                    text = event.detail.take(250),
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, color = StoneMuted, fontSize = 10.sp),
+                    maxLines = 3
                 )
             }
         }
@@ -414,13 +521,13 @@ fun StepTimelineRow(step: TaskStepEntity) {
 }
 
 @Composable
-fun StatusBadge(status: String) {
-    val (bgColor, textColor) = when (status) {
-        "RUNNING" -> Pair(WarmAccentContainer, WarmAccent)
-        "WAITING_APPROVAL" -> Pair(WarmWarning.copy(alpha = 0.15f), WarmWarning)
-        "COMPLETED" -> Pair(WarmSuccess.copy(alpha = 0.15f), WarmSuccess)
-        "FAILED" -> Pair(WarmError.copy(alpha = 0.15f), WarmError)
-        else -> Pair(StoneLight.copy(alpha = 0.2f), StoneMuted)
+fun TaskStatusBadge(status: String) {
+    val (bgColor, textColor, label) = when (status) {
+        "RUNNING" -> Triple(WarmAccentContainer, WarmAccent, "RUNNING")
+        "WAITING_APPROVAL" -> Triple(WarmWarning.copy(alpha = 0.15f), WarmWarning, "NEEDS YOU")
+        "COMPLETED" -> Triple(WarmSuccess.copy(alpha = 0.15f), WarmSuccess, "COMPLETED")
+        "FAILED" -> Triple(WarmError.copy(alpha = 0.15f), WarmError, "FAILED")
+        else -> Triple(StoneLight.copy(alpha = 0.2f), StoneMuted, status)
     }
 
     Surface(
@@ -428,7 +535,7 @@ fun StatusBadge(status: String) {
         shape = RoundedCornerShape(12.dp)
     ) {
         Text(
-            text = status.replace('_', ' '),
+            text = label,
             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, color = textColor),
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
         )
