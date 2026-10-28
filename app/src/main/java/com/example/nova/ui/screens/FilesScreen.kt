@@ -147,6 +147,11 @@ fun FilesScreen(
     var fileLoadError by remember { mutableStateOf<String?>(null) }
     var reloadTrigger by remember { mutableIntStateOf(0) }
 
+    // Environment pack state
+    var envInstalled by remember { mutableStateOf(wm.isEnvironmentInstalled()) }
+    var isInstallingEnv by remember { mutableStateOf(false) }
+    var envStatusMessage by remember { mutableStateOf<String?>(null) }
+
     // Dialog states
     var showCreateFileDialog by remember { mutableStateOf(false) }
     var newFileNameInput by remember { mutableStateOf("") }
@@ -342,6 +347,111 @@ fun FilesScreen(
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(horizontal = 16.dp, vertical = 6.dp)
             )
+
+            // Environment pack card (workspace root only): installs the bundled
+            // agent files (assets/environment/) into the workspace, fully offline.
+            if (currentDirectory.isBlank() && !isSearching) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .testTag("environment_card")
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Agent Environment",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                )
+                                Text(
+                                    text = if (envInstalled) {
+                                        "Environment installed ✓ — agent files live in Environment/"
+                                    } else {
+                                        "Bundled agent files — works offline"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted, fontSize = 11.sp)
+                                )
+                            }
+                            if (envInstalled) {
+                                TextButton(
+                                    onClick = {
+                                        scope.launch {
+                                            isInstallingEnv = true
+                                            try {
+                                                withContext(Dispatchers.IO) { wm.installEnvironment(context) }
+                                                envStatusMessage = "Environment reinstalled ✓"
+                                                reloadTrigger++
+                                            } catch (e: Exception) {
+                                                envStatusMessage = "Install failed: ${e.message}"
+                                            } finally {
+                                                isInstallingEnv = false
+                                            }
+                                        }
+                                    },
+                                    enabled = !isInstallingEnv,
+                                    modifier = Modifier.testTag("reinstall_environment_button")
+                                ) { Text("Reinstall", fontSize = 12.sp) }
+                            }
+                        }
+
+                        if (!envInstalled) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        isInstallingEnv = true
+                                        try {
+                                            val result = withContext(Dispatchers.IO) { wm.installEnvironment(context) }
+                                            envInstalled = wm.isEnvironmentInstalled()
+                                            envStatusMessage = buildString {
+                                                append("Environment installed ✓")
+                                                if (result.templateCopies.isNotEmpty()) {
+                                                    append(" — your edited files were kept; fresh templates saved as ")
+                                                    append(result.templateCopies.joinToString(", "))
+                                                }
+                                            }
+                                            reloadTrigger++
+                                        } catch (e: Exception) {
+                                            envStatusMessage = "Install failed: ${e.message}"
+                                        } finally {
+                                            isInstallingEnv = false
+                                        }
+                                    }
+                                },
+                                enabled = !isInstallingEnv,
+                                shape = RoundedCornerShape(20.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("install_environment_button")
+                            ) {
+                                if (isInstallingEnv) {
+                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                }
+                                Text(
+                                    text = "Install Environment • ${com.example.nova.workspace.WorkspaceManager.environmentPackSizeLabel()}",
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                        }
+
+                        if (envStatusMessage != null) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = envStatusMessage!!,
+                                style = MaterialTheme.typography.bodySmall.copy(color = WarmSuccess, fontSize = 11.sp),
+                                modifier = Modifier.testTag("environment_status")
+                            )
+                        }
+                    }
+                }
+            }
 
             // Search input if open
             if (isSearching) {
