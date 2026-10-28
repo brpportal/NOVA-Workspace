@@ -27,6 +27,17 @@ data class ChatMessageEntity(
     val isStreaming: Boolean = false
 )
 
+@Entity(tableName = "goals")
+data class GoalEntity(
+    @PrimaryKey val id: String = UUID.randomUUID().toString(),
+    val title: String,
+    val description: String? = null,
+    val status: String = "ACTIVE", // ACTIVE, PAUSED, COMPLETED, RETIRED
+    val parentGoalId: String? = null, // One level of subgoal nesting
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
 @Entity(tableName = "agent_tasks")
 data class AgentTaskEntity(
     @PrimaryKey val id: String = UUID.randomUUID().toString(),
@@ -42,7 +53,32 @@ data class AgentTaskEntity(
     val conversationId: String? = null,
     val requiresApprovalAction: String? = null,
     val pendingApprovalToolName: String? = null,
-    val pendingApprovalArgumentsJson: String? = null
+    val pendingApprovalArgumentsJson: String? = null,
+    val goalId: String? = null,
+    val cadence: String = "RUN_ONCE", // RUN_ONCE, DAILY, WEEKLY, MONTHLY
+    val nextRunTime: Long? = null,
+    val citationsJson: String? = null, // JSON array of [{title, url}]
+    val createdFilesJson: String? = null
+)
+
+@Entity(tableName = "task_runs")
+data class TaskRunEntity(
+    @PrimaryKey val id: String = UUID.randomUUID().toString(),
+    val taskId: String,
+    val runTime: Long = System.currentTimeMillis(),
+    val status: String, // SUCCESS, FAILED, CANCELLED
+    val resultSummary: String? = null,
+    val logFileRelPath: String? = null
+)
+
+@Entity(tableName = "agent_created_files")
+data class AgentCreatedFileEntity(
+    @PrimaryKey val relativePath: String,
+    val name: String,
+    val taskId: String? = null,
+    val mimeType: String? = null,
+    val sizeBytes: Long = 0,
+    val createdAt: Long = System.currentTimeMillis()
 )
 
 @Entity(tableName = "task_steps")

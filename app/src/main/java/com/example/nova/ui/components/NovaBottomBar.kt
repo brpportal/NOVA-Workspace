@@ -37,6 +37,9 @@ import com.example.ui.theme.WarmAccent
 import com.example.ui.theme.WarmAccentContainer
 import com.example.ui.theme.WarmBorder
 
+import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.outlined.Flag
+
 enum class NovaScreen(
     val title: String,
     val selectedIcon: ImageVector,
@@ -44,6 +47,7 @@ enum class NovaScreen(
     val tag: String
 ) {
     CHAT("Chat", Icons.AutoMirrored.Filled.Chat, Icons.AutoMirrored.Outlined.Chat, "nav_chat"),
+    GOALS("Goals", Icons.Filled.Flag, Icons.Outlined.Flag, "nav_goals"),
     BROWSER("Browser", Icons.Filled.Language, Icons.Outlined.Language, "nav_browser"),
     FILES("Files", Icons.Filled.Folder, Icons.Outlined.Folder, "nav_files"),
     TASKS("Tasks", Icons.Filled.TaskAlt, Icons.Outlined.TaskAlt, "nav_tasks"),

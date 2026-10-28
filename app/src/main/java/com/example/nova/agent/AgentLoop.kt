@@ -28,6 +28,8 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
+import com.example.nova.data.AgentCreatedFileDao
+import com.example.nova.data.AgentCreatedFileEntity
 import com.example.nova.data.ApprovalDao
 import com.example.nova.data.ApprovalRecordEntity
 import com.example.nova.security.SecretRedactor
@@ -43,6 +45,7 @@ class AgentLoop(
     private val workspaceManager: WorkspaceManager,
     private val maxStepsLimit: Int = 25,
     private val approvalDao: ApprovalDao? = null,
+    private val agentCreatedFileDao: AgentCreatedFileDao? = null,
     private val onPresenceChange: (PipelinePresence) -> Unit = {}
 ) {
     // Map of active running jobs per taskId
@@ -78,6 +81,8 @@ class AgentLoop(
         var stepNumber = 1
         var duplicateCount = 0
         var lastToolCallSignature = ""
+        val visitedCitations = mutableListOf<JSONObject>()
+        val createdFilePaths = mutableListOf<String>()
         val stepsRecord = mutableListOf<String>()
         val logBuffer = StringBuilder()
 
@@ -245,6 +250,39 @@ class AgentLoop(
                     val result = toolExecutor.execute(toolCall.name, parsedArgs, domain)
                     val duration = System.currentTimeMillis() - startTime
 
+                    // Record citations for browser work
+                    val currentUrl = browserController.getCurrentUrl().data.orEmpty()
+                    val currentTitle = browserController.getPageTitle().data.orEmpty().ifBlank { currentUrl }
+                    if (currentUrl.isNotBlank() && currentUrl != "about:blank" && currentUrl != "none") {
+                        if (visitedCitations.none { it.optString("url") == currentUrl }) {
+                            visitedCitations.add(JSONObject().apply {
+                                put("title", currentTitle)
+                                put("url", currentUrl)
+                            })
+                        }
+                    }
+
+                    // Record files created by Spark
+                    if (result.success && isFileTool) {
+                        val filePath = parsedArgs.optString("path").ifBlank { parsedArgs.optString("relativePath") }
+                        if (filePath.isNotBlank()) {
+                            createdFilePaths.add(filePath)
+                            try {
+                                val meta = workspaceManager.getFileMetadata(filePath)
+                                agentCreatedFileDao?.insertCreatedFile(
+                                    AgentCreatedFileEntity(
+                                        relativePath = filePath,
+                                        name = meta.name,
+                                        taskId = taskId,
+                                        mimeType = meta.mimeType,
+                                        sizeBytes = meta.sizeBytes,
+                                        createdAt = System.currentTimeMillis()
+                                    )
+                                )
+                            } catch (ignored: Exception) {}
+                        }
+                    }
+
                     recordStep(
                         taskId = taskId,
                         stepNumber = stepNumber++,
@@ -312,6 +350,23 @@ class AgentLoop(
         } finally {
             onPresenceChange(PipelinePresence.READY)
             try {
+                val citJsonStr = if (visitedCitations.isNotEmpty()) {
+                    org.json.JSONArray().apply {
+                        visitedCitations.forEach { put(it) }
+                    }.toString()
+                } else null
+
+                val filesJsonStr = if (createdFilePaths.isNotEmpty()) {
+                    org.json.JSONArray(createdFilePaths).toString()
+                } else null
+
+                currentTask = currentTask.copy(
+                    citationsJson = citJsonStr,
+                    createdFilesJson = filesJsonStr,
+                    updatedAt = System.currentTimeMillis()
+                )
+                taskDao.updateTask(currentTask)
+
                 val datePrefix = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
                 val cleanTitle = task.title.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(25).trimEnd('_')
                 val folderName = "${datePrefix}_$cleanTitle"

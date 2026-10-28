@@ -54,6 +54,8 @@ import com.example.ui.theme.WarmAccent
 
 import com.example.nova.ui.screens.ApprovalsScreen
 
+import com.example.nova.ui.screens.GoalsScreen
+
 @Composable
 fun NovaApp(
     repository: NovaRepository,
@@ -178,6 +180,10 @@ fun NovaApp(
                         NovaScreen.CHAT -> ChatScreen(
                             repository = repository,
                             onNavigateToScreen = { currentScreen = it }
+                        )
+                        NovaScreen.GOALS -> GoalsScreen(
+                            repository = repository,
+                            onNavigateToTask = { currentScreen = NovaScreen.TASKS }
                         )
                         NovaScreen.BROWSER -> BrowserScreen(
                             repository = repository

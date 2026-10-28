@@ -95,13 +95,15 @@ fun TasksScreen(
 ) {
     val tasks by repository.tasks.collectAsState(initial = emptyList())
     var selectedFilterIndex by remember { mutableIntStateOf(0) }
-    val filterTabs = listOf("All", "Active", "Needs Approval", "Completed")
+    val filterTabs = listOf("All", "Active", "Needs Approval", "Upcoming", "Completed")
 
     val filteredTasks = remember(tasks, selectedFilterIndex) {
         when (selectedFilterIndex) {
             1 -> tasks.filter { it.status == "RUNNING" || it.status == "PENDING" || it.status == "PAUSED" }
             2 -> tasks.filter { it.status == "WAITING_APPROVAL" }
-            3 -> tasks.filter { it.status == "COMPLETED" || it.status == "FAILED" || it.status == "CANCELLED" }
+            3 -> tasks.filter { (it.cadence != "RUN_ONCE" || it.nextRunTime != null) && it.status != "CANCELLED" }
+                .sortedBy { it.nextRunTime ?: Long.MAX_VALUE }
+            4 -> tasks.filter { it.status == "COMPLETED" || it.status == "FAILED" || it.status == "CANCELLED" }
             else -> tasks
         }
     }
@@ -222,8 +224,28 @@ fun TaskCardItem(
     val steps by repository.taskDao.getStepsForTask(task.id).collectAsState(initial = emptyList())
     val approvals by repository.approvals.collectAsState(initial = emptyList())
     val taskApprovals = remember(approvals, task.id) { approvals.filter { it.taskId == task.id } }
+    val runHistory by repository.taskRunDao.getRunsForTask(task.id).collectAsState(initial = emptyList())
 
     var isExpanded by remember { mutableStateOf(false) }
+
+    // Parse citations if present
+    val citationsList = remember(task.citationsJson) {
+        if (!task.citationsJson.isNullOrBlank()) {
+            try {
+                val array = org.json.JSONArray(task.citationsJson)
+                val result = mutableListOf<Pair<String, String>>()
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    result.add(Pair(obj.optString("title", "Page"), obj.optString("url", "")))
+                }
+                result
+            } catch (e: Exception) {
+                emptyList()
+            }
+        } else {
+            emptyList()
+        }
+    }
 
     // Build unified audit trail timeline
     val auditEvents = remember(task, steps, taskApprovals) {
@@ -310,12 +332,23 @@ fun TaskCardItem(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = task.title,
-                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface),
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1
-                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = task.title,
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface),
+                        maxLines = 1
+                    )
+                    if (task.cadence != "RUN_ONCE") {
+                        val sdf = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
+                        val nextRunStr = if (task.nextRunTime != null) sdf.format(Date(task.nextRunTime)) else "Pending"
+                        Text(
+                            text = "Cadence: ${task.cadence} • Next: $nextRunStr",
+                            style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold),
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
                 TaskStatusBadge(status = task.status)
             }
 
@@ -327,6 +360,32 @@ fun TaskCardItem(
                 style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted),
                 maxLines = 2
             )
+
+            // Sources / Citations Card if browser tasks visited pages
+            if (citationsList.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = "Sources Visited (${citationsList.size})",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        for (citation in citationsList.take(3)) {
+                            Text(
+                                text = "• ${citation.first} — ${citation.second}",
+                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface),
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
 
             // Measurable Progress Bar (when progressPercent >= 0)
             if (task.progressPercent >= 0 && (task.status == "RUNNING" || task.status == "PENDING")) {
@@ -424,7 +483,7 @@ fun TaskCardItem(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Audit Trail (${auditEvents.size} events)",
+                            text = "Audit Trail & Runs (${auditEvents.size} events, ${runHistory.size} runs)",
                             style = MaterialTheme.typography.labelSmall.copy(color = StoneMuted, fontWeight = FontWeight.Medium)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
@@ -456,7 +515,7 @@ fun TaskCardItem(
                 }
             }
 
-            // Unified Chronological Audit Trail Timeline when expanded
+            // Unified Chronological Audit Trail Timeline & Run History when expanded
             AnimatedVisibility(visible = isExpanded) {
                 Column(
                     modifier = Modifier
@@ -464,6 +523,34 @@ fun TaskCardItem(
                         .padding(top = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    if (runHistory.isNotEmpty()) {
+                        Text(
+                            text = "Scheduled Run History",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        )
+                        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+                        for (run in runHistory) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Run at ${sdf.format(Date(run.runTime))}", fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                                    Text(run.status, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (run.status == "SUCCESS" || run.status == "COMPLETED") WarmSuccess else WarmError)
+                                }
+                            }
+                        }
+                    }
+
+                    Text(
+                        text = "Step Audit Trail",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    )
                     for (event in auditEvents) {
                         AuditTimelineRow(event = event)
                     }

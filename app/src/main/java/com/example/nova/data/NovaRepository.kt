@@ -41,6 +41,9 @@ class NovaRepository(
     val permissionDao = db.permissionDao()
     val settingsDao = db.settingsDao()
     val approvalDao = db.approvalDao()
+    val goalDao = db.goalDao()
+    val taskRunDao = db.taskRunDao()
+    val agentCreatedFileDao = db.agentCreatedFileDao()
 
     val vaultManager = VaultManager(secretDao)
     val toolRegistry = ToolRegistry()
@@ -59,6 +62,7 @@ class NovaRepository(
         browserController = browserController,
         workspaceManager = workspaceManager,
         approvalDao = approvalDao,
+        agentCreatedFileDao = agentCreatedFileDao,
         onPresenceChange = { pipelinePresence.value = it }
     )
 
@@ -71,6 +75,9 @@ class NovaRepository(
     val history: Flow<List<BrowserHistoryEntry>> = browserDao.getHistory()
     val settings: Flow<List<AppSettingsEntity>> = settingsDao.getAllSettings()
     val approvals: Flow<List<ApprovalRecordEntity>> = approvalDao.getAllApprovals()
+    val goals: Flow<List<GoalEntity>> = goalDao.getAllGoals()
+    val upcomingTasks: Flow<List<AgentTaskEntity>> = taskDao.getUpcomingTasks()
+    val createdFiles: Flow<List<AgentCreatedFileEntity>> = agentCreatedFileDao.getAllCreatedFiles()
 
     init {
         // Start background approval timeout loop (2-minute timeout)
@@ -80,6 +87,15 @@ class NovaRepository(
                     checkApprovalTimeouts()
                 } catch (ignored: Exception) {}
                 delay(5000)
+            }
+        }
+        // Start background due scheduled tasks check loop
+        scope.launch {
+            while (isActive) {
+                try {
+                    executeDueScheduledTasks()
+                } catch (ignored: Exception) {}
+                delay(30_000)
             }
         }
     }
@@ -290,9 +306,62 @@ class NovaRepository(
         }
     }
 
-    fun launchTask(prompt: String, title: String? = null, conversationId: String? = null): String {
+    companion object {
+        @Volatile
+        private var INSTANCE: NovaRepository? = null
+
+        fun getInstance(context: Context, db: AppDatabase? = null): NovaRepository {
+            return INSTANCE ?: synchronized(this) {
+                val database = db ?: AppDatabase.getDatabase(context)
+                val instance = NovaRepository(context.applicationContext, database)
+                INSTANCE = instance
+                instance
+            }
+        }
+    }
+
+    suspend fun createGoal(title: String, description: String? = null, parentGoalId: String? = null, status: String = "ACTIVE"): GoalEntity {
+        val goal = GoalEntity(
+            title = title,
+            description = description,
+            parentGoalId = parentGoalId,
+            status = status
+        )
+        goalDao.insertGoal(goal)
+        return goal
+    }
+
+    suspend fun updateGoal(goal: GoalEntity) {
+        goalDao.updateGoal(goal.copy(updatedAt = System.currentTimeMillis()))
+    }
+
+    suspend fun deleteGoal(goalId: String) {
+        goalDao.deleteGoalById(goalId)
+    }
+
+    suspend fun linkTaskToGoal(taskId: String, goalId: String?) {
+        val task = taskDao.getTaskById(taskId)
+        if (task != null) {
+            taskDao.updateTask(task.copy(goalId = goalId, updatedAt = System.currentTimeMillis()))
+        }
+    }
+
+    fun launchTask(
+        prompt: String,
+        title: String? = null,
+        conversationId: String? = null,
+        goalId: String? = null,
+        cadence: String = "RUN_ONCE",
+        firstRunTime: Long? = null
+    ): String {
         val taskId = UUID.randomUUID().toString()
         val taskTitle = title ?: prompt.take(35).let { if (prompt.length > 35) "$it..." else it }
+        val calculatedNextRun = if (cadence != "RUN_ONCE") {
+            firstRunTime ?: calculateNextRunTime(cadence, System.currentTimeMillis())
+        } else {
+            null
+        }
+
         val task = AgentTaskEntity(
             id = taskId,
             title = taskTitle,
@@ -300,6 +369,9 @@ class NovaRepository(
             status = "PENDING",
             currentOperation = "Queued",
             conversationId = conversationId,
+            goalId = goalId,
+            cadence = cadence,
+            nextRunTime = calculatedNextRun,
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis()
         )
@@ -311,9 +383,69 @@ class NovaRepository(
                 agentLoop.runTask(task, provider, conversationId)
             }
             agentLoop.registerJob(taskId, job)
+
+            if (cadence != "RUN_ONCE") {
+                scheduleWorkManagerCadenceJob()
+            }
         }
 
         return taskId
+    }
+
+    fun calculateNextRunTime(cadence: String, fromTime: Long): Long {
+        val dayMs = 24 * 60 * 60 * 1000L
+        return when (cadence) {
+            "DAILY" -> fromTime + dayMs
+            "WEEKLY" -> fromTime + 7 * dayMs
+            "MONTHLY" -> fromTime + 30 * dayMs
+            else -> fromTime + dayMs
+        }
+    }
+
+    suspend fun executeDueScheduledTasks() {
+        val now = System.currentTimeMillis()
+        val dueTasks = taskDao.getDueTasks(now)
+        for (task in dueTasks) {
+            // Advance the schedule first so neither the in-app loop nor the
+            // WorkManager worker can pick the same task up twice.
+            val nextRun = calculateNextRunTime(task.cadence, now)
+            taskDao.updateTask(task.copy(nextRunTime = nextRun, updatedAt = now))
+
+            val provider = getActiveProvider()
+            scope.launch {
+                agentLoop.runTask(task, provider, task.conversationId)
+                // Record the run only AFTER it finishes, with its real
+                // outcome — never a pre-written SUCCESS (merge fix).
+                val finished = taskDao.getTaskById(task.id)
+                val runStatus = when (finished?.status) {
+                    "COMPLETED" -> "SUCCESS"
+                    "FAILED" -> "FAILED"
+                    "CANCELLED" -> "CANCELLED"
+                    else -> finished?.status ?: "FAILED"
+                }
+                taskRunDao.insertRun(
+                    TaskRunEntity(
+                        taskId = task.id,
+                        runTime = System.currentTimeMillis(),
+                        status = runStatus,
+                        resultSummary = finished?.currentOperation ?: "Scheduled run (${task.cadence})"
+                    )
+                )
+            }
+        }
+    }
+
+    fun scheduleWorkManagerCadenceJob() {
+        try {
+            val workRequest = androidx.work.PeriodicWorkRequestBuilder<com.example.nova.worker.SparkTaskWorker>(
+                15, java.util.concurrent.TimeUnit.MINUTES
+            ).build()
+            androidx.work.WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+                "SparkCadenceTasksWork",
+                androidx.work.ExistingPeriodicWorkPolicy.KEEP,
+                workRequest
+            )
+        } catch (ignored: Exception) {}
     }
 
     fun approveTask(taskId: String, policy: String = "ALLOW_ONCE") {

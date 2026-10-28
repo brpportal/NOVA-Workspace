@@ -42,12 +42,48 @@ interface ChatDao {
 }
 
 @Dao
+interface GoalDao {
+    @Query("SELECT * FROM goals ORDER BY createdAt DESC")
+    fun getAllGoals(): Flow<List<GoalEntity>>
+
+    @Query("SELECT * FROM goals WHERE parentGoalId IS NULL ORDER BY createdAt DESC")
+    fun getRootGoals(): Flow<List<GoalEntity>>
+
+    @Query("SELECT * FROM goals WHERE parentGoalId = :parentId ORDER BY createdAt DESC")
+    fun getSubgoals(parentId: String): Flow<List<GoalEntity>>
+
+    @Query("SELECT * FROM goals WHERE id = :id LIMIT 1")
+    suspend fun getGoalById(id: String): GoalEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertGoal(goal: GoalEntity)
+
+    @Update
+    suspend fun updateGoal(goal: GoalEntity)
+
+    @Query("DELETE FROM goals WHERE id = :id OR parentGoalId = :id")
+    suspend fun deleteGoalById(id: String)
+}
+
+@Dao
 interface TaskDao {
     @Query("SELECT * FROM agent_tasks ORDER BY updatedAt DESC")
     fun getAllTasks(): Flow<List<AgentTaskEntity>>
 
     @Query("SELECT * FROM agent_tasks WHERE status IN ('PENDING', 'RUNNING', 'WAITING_APPROVAL', 'PAUSED') ORDER BY updatedAt DESC")
     fun getActiveTasks(): Flow<List<AgentTaskEntity>>
+
+    @Query("SELECT * FROM agent_tasks WHERE goalId = :goalId ORDER BY createdAt DESC")
+    fun getTasksForGoal(goalId: String): Flow<List<AgentTaskEntity>>
+
+    @Query("SELECT * FROM agent_tasks WHERE goalId = :goalId")
+    suspend fun getTasksForGoalSync(goalId: String): List<AgentTaskEntity>
+
+    @Query("SELECT * FROM agent_tasks WHERE cadence != 'RUN_ONCE' AND nextRunTime IS NOT NULL ORDER BY nextRunTime ASC")
+    fun getUpcomingTasks(): Flow<List<AgentTaskEntity>>
+
+    @Query("SELECT * FROM agent_tasks WHERE cadence != 'RUN_ONCE' AND nextRunTime IS NOT NULL AND nextRunTime <= :now")
+    suspend fun getDueTasks(now: Long): List<AgentTaskEntity>
 
     @Query("SELECT * FROM agent_tasks WHERE id = :id LIMIT 1")
     suspend fun getTaskById(id: String): AgentTaskEntity?
@@ -75,6 +111,30 @@ interface TaskDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertToolExecution(execution: ToolExecutionEntity)
+}
+
+@Dao
+interface TaskRunDao {
+    @Query("SELECT * FROM task_runs WHERE taskId = :taskId ORDER BY runTime DESC")
+    fun getRunsForTask(taskId: String): Flow<List<TaskRunEntity>>
+
+    @Query("SELECT * FROM task_runs ORDER BY runTime DESC LIMIT 100")
+    fun getAllRuns(): Flow<List<TaskRunEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRun(run: TaskRunEntity)
+}
+
+@Dao
+interface AgentCreatedFileDao {
+    @Query("SELECT * FROM agent_created_files ORDER BY createdAt DESC")
+    fun getAllCreatedFiles(): Flow<List<AgentCreatedFileEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCreatedFile(file: AgentCreatedFileEntity)
+
+    @Query("DELETE FROM agent_created_files WHERE relativePath = :relativePath")
+    suspend fun deleteCreatedFile(relativePath: String)
 }
 
 @Dao

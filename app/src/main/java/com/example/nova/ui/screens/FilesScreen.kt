@@ -81,6 +81,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -214,17 +215,23 @@ fun FilesScreen(
         }
     }
 
+    // Section toggle: 0 = Folder Tree, 1 = Created by Spark
+    var selectedSectionIndex by remember { mutableIntStateOf(0) }
+    val createdFiles by repository.createdFiles.collectAsState(initial = emptyList())
+    var viewingHtmlPath by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var viewingTextPath by remember { mutableStateOf<Pair<String, String>?>(null) }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Column {
                         Text(
-                            text = if (isMultiSelectMode) "${selectedPaths.size} Selected" else "Workspace Files",
+                            text = if (isMultiSelectMode) "${selectedPaths.size} Selected" else if (selectedSectionIndex == 1) "Created by Spark" else "Workspace Files",
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                         )
                         Text(
-                            text = if (currentDirectory.isBlank()) "Root (/)" else "/$currentDirectory",
+                            text = if (selectedSectionIndex == 1) "${createdFiles.size} agent-generated files" else if (currentDirectory.isBlank()) "Root (/)" else "/$currentDirectory",
                             style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.primary)
                         )
                     }
@@ -237,7 +244,7 @@ fun FilesScreen(
                         }) {
                             Icon(Icons.Default.Close, contentDescription = "Exit Selection")
                         }
-                    } else if (currentDirectory.isNotBlank()) {
+                    } else if (currentDirectory.isNotBlank() && selectedSectionIndex == 0) {
                         IconButton(
                             onClick = {
                                 val parent = currentDirectory.substringBeforeLast('/', "")
@@ -335,15 +342,127 @@ fun FilesScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            // Interactive Breadcrumbs Bar
-            BreadcrumbBar(
-                currentDirectory = currentDirectory,
-                onNavigate = { currentDirectory = it },
+            // Section Switcher: Workspace Files vs Created by Spark
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(MaterialTheme.colorScheme.surface)
-                    .padding(horizontal = 16.dp, vertical = 6.dp)
-            )
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = if (selectedSectionIndex == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.clickable { selectedSectionIndex = 0 }
+                ) {
+                    Text(
+                        text = "Folder Tree",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (selectedSectionIndex == 0) Color.White else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = if (selectedSectionIndex == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.clickable { selectedSectionIndex = 1 }
+                ) {
+                    Text(
+                        text = "Created by Spark (${createdFiles.size})",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (selectedSectionIndex == 1) Color.White else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                    )
+                }
+            }
+
+            if (selectedSectionIndex == 1) {
+                // Render "Created by Spark" Section
+                if (createdFiles.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(40.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("✨", fontSize = 36.sp)
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text("No files created by Spark yet.", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("When Spark writes or generates files during tasks, they appear here.", style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(createdFiles, key = { it.relativePath }) { agentFile ->
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        try {
+                                            val content = wm.readFileWithLimit(agentFile.relativePath)
+                                            val ext = agentFile.relativePath.substringAfterLast('.').lowercase()
+                                            if (ext == "html" || ext == "htm") {
+                                                viewingHtmlPath = Pair(agentFile.relativePath, content)
+                                            } else {
+                                                viewingTextPath = Pair(agentFile.relativePath, content)
+                                            }
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "Read error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        modifier = Modifier.size(38.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(Icons.Default.Code, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(agentFile.name, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold))
+                                        Text(agentFile.relativePath, style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted, fontSize = 11.sp))
+                                    }
+                                    val ext = agentFile.relativePath.substringAfterLast('.').uppercase()
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant
+                                    ) {
+                                        Text(ext, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Interactive Breadcrumbs Bar
+                BreadcrumbBar(
+                    currentDirectory = currentDirectory,
+                    onNavigate = { currentDirectory = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surface)
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                )
 
             // Install Environment Card (only at root)
             if (currentDirectory.isBlank() && !isLoadingFiles && fileLoadError == null) {
@@ -620,6 +739,68 @@ fun FilesScreen(
                 }
             }
         }
+    }
+    }
+
+    // Simple HTML Viewer Dialog
+    if (viewingHtmlPath != null) {
+        val (path, content) = viewingHtmlPath!!
+        AlertDialog(
+            onDismissRequest = { viewingHtmlPath = null },
+            title = {
+                Text(path.substringAfterLast('/'), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold))
+            },
+            text = {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(360.dp)
+                ) {
+                    androidx.compose.ui.viewinterop.AndroidView(
+                        factory = { ctx ->
+                            android.webkit.WebView(ctx).apply {
+                                settings.javaScriptEnabled = true
+                                loadDataWithBaseURL(null, content, "text/html", "UTF-8", null)
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { viewingHtmlPath = null }) { Text("Close") }
+            }
+        )
+    }
+
+    // Simple Text/CSV/Markdown Viewer Dialog
+    if (viewingTextPath != null) {
+        val (path, content) = viewingTextPath!!
+        AlertDialog(
+            onDismissRequest = { viewingTextPath = null },
+            title = {
+                Text(path.substringAfterLast('/'), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold))
+            },
+            text = {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(360.dp)
+                ) {
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        item {
+                            Text(
+                                text = content,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { viewingTextPath = null }) { Text("Close") }
+            }
+        )
     }
 
     // --- DIALOGS & PREVIEW MODALS ---
@@ -991,7 +1172,7 @@ private fun shareFile(context: android.content.Context, file: File) {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "*/*"
             putExtra(Intent.EXTRA_STREAM, Uri.fromFile(file))
-            putExtra(Intent.EXTRA_TEXT, "Shared from Spark: ${file.name}")
+            putExtra(Intent.EXTRA_TEXT, "Shared from NOVA Workspace: ${file.name}")
         }
         context.startActivity(Intent.createChooser(intent, "Share file"))
     } catch (e: Exception) {

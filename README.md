@@ -29,6 +29,17 @@ Spark (formerly NOVA Workspace) is a production-oriented, standalone native Andr
 > code remains in this repo's git history, and the Milestone 1 release is
 > untouched.
 >
+> **Phase 2 (2026-10-28, under CI verification):** `main` now also contains
+> the Phase 2 upgrade from the REA-study plan — a **Goals** tab (goals and
+> one level of subgoals with statuses and task-completion progress, tasks
+> linkable to goals), **recurring tasks** (run-once / daily / weekly /
+> monthly cadence executed by a WorkManager background job, with an
+> Upcoming view and a per-task run history recorded from real outcomes),
+> a **Created by Spark** files section with text/markdown/CSV and HTML
+> viewers, and **Sources** citations on browser tasks. The Phase 1 and
+> fix-round behaviours above were re-checked against this code as well
+> before shipping.
+>
 > All releases: [github.com/brpportal/NOVA-Workspace/releases](https://github.com/brpportal/NOVA-Workspace/releases)
 
 ---

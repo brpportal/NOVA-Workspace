@@ -19,9 +19,12 @@ import androidx.room.RoomDatabase
         SecretMetadataEntity::class,
         PermissionRuleEntity::class,
         AppSettingsEntity::class,
-        ApprovalRecordEntity::class
+        ApprovalRecordEntity::class,
+        GoalEntity::class,
+        TaskRunEntity::class,
+        AgentCreatedFileEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -33,6 +36,9 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun permissionDao(): PermissionDao
     abstract fun settingsDao(): SettingsDao
     abstract fun approvalDao(): ApprovalDao
+    abstract fun goalDao(): GoalDao
+    abstract fun taskRunDao(): TaskRunDao
+    abstract fun agentCreatedFileDao(): AgentCreatedFileDao
 
     companion object {
         @Volatile
