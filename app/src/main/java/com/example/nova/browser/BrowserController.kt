@@ -213,6 +213,211 @@ class BrowserController {
         }
     }
 
+    suspend fun goForwardAction(): BrowserActionResult = withContext(Dispatchers.Main) {
+        val wv = webViewRef?.get() ?: return@withContext BrowserActionResult(false, "WebView not available")
+        if (wv.canGoForward()) {
+            wv.goForward()
+            BrowserActionResult(success = true, message = "Navigated forward")
+        } else {
+            BrowserActionResult(false, "Cannot navigate forward (history stack is empty)")
+        }
+    }
+
+    /** Polls document.readyState until "complete" or the timeout elapses. */
+    suspend fun waitForLoad(timeoutMs: Long = 8000): BrowserActionResult {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var state = ""
+        while (System.currentTimeMillis() < deadline) {
+            val raw = evaluateJs("document.readyState") ?: break
+            state = unescapeJsString(raw)
+            if (state == "complete") {
+                return BrowserActionResult(success = true, message = "Page finished loading (readyState=complete)")
+            }
+            delay(250)
+        }
+        return BrowserActionResult(
+            success = true,
+            message = "Waited ${timeoutMs}ms for page load (readyState=${state.ifBlank { "unknown" }})"
+        )
+    }
+
+    /**
+     * Set-of-marks observation: waits briefly for the page to settle, then
+     * extracts the interactive elements from the live DOM. Each element gets
+     * a stable [PageElement.index] (stamped into the DOM as data-spark-idx)
+     * that click_element / type_text act on. Pure parsing lives in
+     * [PageElementsParser].
+     */
+    suspend fun observePage(): PageObservation {
+        waitForLoad(3500)
+        val raw = evaluateJs(OBSERVE_JS) ?: "{}"
+        return PageElementsParser.parse(unescapeJsString(raw))
+    }
+
+    /** Clicks the element with the given observation index. */
+    suspend fun clickElement(index: Int): BrowserActionResult {
+        if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
+            return BrowserActionResult(false, "Blocked: Manual control active.")
+        }
+        animateCursorToElement(index)
+        val js = """
+            (function() {
+                try {
+                    var el = document.querySelector('[data-spark-idx="$index"]');
+                    if (!el) return JSON.stringify({success: false, error: 'Element $index not found on this page. The page changed — call observe_page for fresh indices.'});
+                    el.scrollIntoView({behavior: 'instant', block: 'center'});
+                    if (el.focus) { try { el.focus({preventScroll: true}); } catch(e) {} }
+                    el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                    el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                    el.click();
+                    var label = (el.innerText || el.getAttribute('aria-label') || el.placeholder || el.name || '').trim();
+                    return JSON.stringify({success: true, tag: el.tagName, label: label.substring(0, 60)});
+                } catch(e) {
+                    return JSON.stringify({success: false, error: e.toString()});
+                }
+            })();
+        """.trimIndent()
+        val raw = evaluateJs(js) ?: "{}"
+        val clean = unescapeJsString(raw)
+        val success = clean.contains("\"success\":true")
+        logAction(if (success) "AI clicked element [$index]" else "AI failed click on element [$index]")
+        delay(100)
+        hideCursor()
+        return BrowserActionResult(
+            success = success,
+            message = if (success) "Clicked element [$index]" else "Failed to click element [$index]",
+            data = clean
+        )
+    }
+
+    /**
+     * Types into the element with the given observation index using the
+     * native value setter, so React-style controlled inputs actually
+     * register the change (a plain `el.value = ...` assignment is invisible
+     * to React's value tracking and the form stays empty). Optionally
+     * submits: Enter key events plus form requestSubmit/submit.
+     */
+    suspend fun typeText(index: Int, text: String, clearFirst: Boolean = true, submit: Boolean = false): BrowserActionResult {
+        if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
+            return BrowserActionResult(false, "Blocked: Manual control active.")
+        }
+        showKeystrokes(text)
+        val escapedText = JSONObject.quote(text)
+        val js = """
+            (function() {
+                try {
+                    var el = document.querySelector('[data-spark-idx="$index"]');
+                    if (!el) return JSON.stringify({success: false, error: 'Element $index not found on this page. The page changed — call observe_page for fresh indices.'});
+                    el.scrollIntoView({behavior: 'instant', block: 'center'});
+                    el.focus();
+                    var newVal = '';
+                    if (el.isContentEditable) {
+                        document.execCommand('selectAll', false, null);
+                        document.execCommand('insertText', false, $escapedText);
+                        newVal = el.innerText || '';
+                    } else {
+                        var proto = el instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+                        var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                        var base = $clearFirst ? '' : (el.value || '');
+                        newVal = base + $escapedText;
+                        if (desc && desc.set) { desc.set.call(el, newVal); } else { el.value = newVal; }
+                        el.dispatchEvent(new Event('input', {bubbles: true}));
+                        el.dispatchEvent(new Event('change', {bubbles: true}));
+                    }
+                    var submitted = false;
+                    if ($submit) {
+                        var opts = {bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13};
+                        el.dispatchEvent(new KeyboardEvent('keydown', opts));
+                        el.dispatchEvent(new KeyboardEvent('keypress', opts));
+                        el.dispatchEvent(new KeyboardEvent('keyup', opts));
+                        var form = el.form || (el.closest ? el.closest('form') : null);
+                        if (form) {
+                            if (form.requestSubmit) { form.requestSubmit(); } else { form.submit(); }
+                            submitted = true;
+                        }
+                    }
+                    var shown = el.type === 'password' ? '(hidden)' : (el.value || newVal || '').substring(0, 60);
+                    return JSON.stringify({success: true, value: shown, submitted: submitted});
+                } catch(e) {
+                    return JSON.stringify({success: false, error: e.toString()});
+                }
+            })();
+        """.trimIndent()
+        val raw = evaluateJs(js) ?: "{}"
+        val clean = unescapeJsString(raw)
+        val success = clean.contains("\"success\":true")
+        logAction(if (success) "AI typed into element [$index]: \"$text\"" else "AI failed typing into element [$index]")
+        delay(300)
+        hideKeystrokes()
+        return BrowserActionResult(
+            success = success,
+            message = if (success) "Typed into element [$index]" else "Failed to type into element [$index]",
+            data = clean
+        )
+    }
+
+    /** Coordinate fallback: taps whatever element is at viewport (x, y). */
+    suspend fun tapAt(x: Int, y: Int): BrowserActionResult {
+        if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
+            return BrowserActionResult(false, "Blocked: Manual control active.")
+        }
+        updateCursor(x.toFloat(), y.toFloat(), isClicking = false)
+        delay(120)
+        updateCursor(x.toFloat(), y.toFloat(), isClicking = true)
+        delay(80)
+        val js = """
+            (function() {
+                try {
+                    var el = document.elementFromPoint($x, $y);
+                    if (!el) return JSON.stringify({success: false, error: 'No element at ($x, $y)'});
+                    el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                    el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                    el.click();
+                    var label = (el.innerText || el.getAttribute('aria-label') || '').trim();
+                    return JSON.stringify({success: true, tag: el.tagName, label: label.substring(0, 60)});
+                } catch(e) {
+                    return JSON.stringify({success: false, error: e.toString()});
+                }
+            })();
+        """.trimIndent()
+        val raw = evaluateJs(js) ?: "{}"
+        val clean = unescapeJsString(raw)
+        val success = clean.contains("\"success\":true")
+        logAction(if (success) "AI tapped at ($x, $y)" else "AI failed tap at ($x, $y)")
+        delay(100)
+        hideCursor()
+        return BrowserActionResult(
+            success = success,
+            message = if (success) "Tapped at ($x, $y)" else "Failed to tap at ($x, $y)",
+            data = clean
+        )
+    }
+
+    private suspend fun animateCursorToElement(index: Int) {
+        val coordJs = """
+            (function() {
+                try {
+                    var el = document.querySelector('[data-spark-idx="$index"]');
+                    if (!el) return null;
+                    var r = el.getBoundingClientRect();
+                    return JSON.stringify({ x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) });
+                } catch(e) { return null; }
+            })();
+        """.trimIndent()
+        val coordRaw = evaluateJs(coordJs)
+        if (!coordRaw.isNullOrBlank() && coordRaw != "null") {
+            try {
+                val cObj = JSONObject(unescapeJsString(coordRaw))
+                val cx = cObj.getInt("x").toFloat()
+                val cy = cObj.getInt("y").toFloat()
+                updateCursor(cx, cy, isClicking = false)
+                delay(120)
+                updateCursor(cx, cy, isClicking = true)
+                delay(80)
+            } catch (e: Exception) {}
+        }
+    }
+
     suspend fun reloadAction(): BrowserActionResult = withContext(Dispatchers.Main) {
         val wv = webViewRef?.get() ?: return@withContext BrowserActionResult(false, "WebView not available")
         wv.reload()
@@ -328,8 +533,11 @@ class BrowserController {
                     if (!el) return JSON.stringify({success: false, error: 'Input element not found'});
                     el.scrollIntoView({behavior: 'instant', block: 'center'});
                     el.focus();
-                    if ($clearFirst) { el.value = ''; }
-                    el.value += $escapedText;
+                    var proto = el instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+                    var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                    var base = $clearFirst ? '' : (el.value || '');
+                    var nv = base + $escapedText;
+                    if (desc && desc.set) { desc.set.call(el, nv); } else { el.value = nv; }
                     el.dispatchEvent(new Event('input', { bubbles: true }));
                     el.dispatchEvent(new Event('change', { bubbles: true }));
                     return JSON.stringify({success: true});
@@ -658,6 +866,73 @@ class BrowserController {
             data = clean
         )
     }
+
+    /**
+     * DOM extraction for [observePage]: collects visible interactive
+     * elements in document order, stamps each with data-spark-idx, and
+     * returns URL/title/elements/text as a JSON string. Password values are
+     * never read; other field values are echoed truncated so the model can
+     * verify typing actually landed.
+     */
+    private val OBSERVE_JS = """
+        (function() {
+            try {
+                var selectors = 'a[href], button, input, select, textarea, [role="button"], [role="link"], [onclick], [tabindex]';
+                var nodes = document.querySelectorAll(selectors);
+                var results = [];
+                var idx = 0;
+                for (var i = 0; i < nodes.length && idx < 60; i++) {
+                    var el = nodes[i];
+                    if (el.getAttribute('type') === 'hidden') continue;
+                    var rect = el.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0) continue;
+                    var style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden') continue;
+                    idx++;
+                    el.setAttribute('data-spark-idx', idx);
+                    var label = '';
+                    var text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
+                    if (text) { label = text; }
+                    else if (el.getAttribute('aria-label')) { label = el.getAttribute('aria-label').trim(); }
+                    else if (el.placeholder) { label = el.placeholder; }
+                    else if (el.title) { label = el.title; }
+                    else if (el.getAttribute('name')) { label = el.getAttribute('name'); }
+                    else if (el.value && (el.tagName === 'BUTTON' || el.getAttribute('type') === 'submit' || el.getAttribute('type') === 'button')) { label = el.value; }
+                    var val = '';
+                    if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') && el.getAttribute('type') !== 'password') {
+                        val = (el.value || '').substring(0, 60);
+                    }
+                    var inVp = rect.bottom >= 0 && rect.right >= 0 && rect.top <= window.innerHeight && rect.left <= window.innerWidth;
+                    results.push({
+                        index: idx,
+                        tag: el.tagName.toLowerCase(),
+                        type: el.getAttribute('type') || '',
+                        label: label.substring(0, 120),
+                        placeholder: el.placeholder || '',
+                        name: el.getAttribute('name') || '',
+                        href: el.tagName === 'A' ? (el.href || '') : '',
+                        value: val,
+                        disabled: !!el.disabled,
+                        x: Math.round(rect.left + rect.width / 2),
+                        y: Math.round(rect.top + rect.height / 2),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height),
+                        inViewport: inVp
+                    });
+                }
+                var textExcerpt = '';
+                try { textExcerpt = document.body ? document.body.innerText.substring(0, 2500) : ''; } catch (e) {}
+                return JSON.stringify({
+                    url: window.location.href,
+                    title: document.title || '',
+                    elements: results,
+                    text: textExcerpt
+                });
+            } catch (e) {
+                return JSON.stringify({url: '', title: '', elements: [], text: ''});
+            }
+        })();
+    """.trimIndent()
 
     private suspend fun evaluateJs(script: String, timeoutMs: Long = 5000): String? {
         return withTimeoutOrNull(timeoutMs) {

@@ -54,8 +54,83 @@ object ToolDefinitions {
             """.trimIndent()
         ),
         AIToolDefinition(
+            name = "observe_page",
+            description = "Observes the current page: returns the URL, title, a numbered list of interactive elements (links, buttons, inputs, selects) with their labels, and a text excerpt. Use the returned indices with click_element and type_text. Call this whenever the page has changed and you need to know what is on it — never guess element indices or selectors.",
+            parametersSchemaJson = """{ "type": "object", "properties": {} }"""
+        ),
+        AIToolDefinition(
+            name = "click_element",
+            description = "Clicks the interactive element with the given index from the most recent page observation. Real click with focus and mouse events. If it fails, the page changed — call observe_page again for fresh indices.",
+            parametersSchemaJson = """
+            {
+                "type": "object",
+                "properties": {
+                    "index": { "type": "integer", "description": "Element index from the latest observation" }
+                },
+                "required": ["index"]
+            }
+            """.trimIndent()
+        ),
+        AIToolDefinition(
+            name = "type_text",
+            description = "Types text into the input/textarea with the given index from the most recent page observation. Focuses the field and sets the value with the native setter plus input/change events, so real forms (including React apps and Google search) register it. Set submit=true to press Enter and submit the form afterwards (e.g. for a search box).",
+            parametersSchemaJson = """
+            {
+                "type": "object",
+                "properties": {
+                    "index": { "type": "integer", "description": "Element index from the latest observation" },
+                    "text": { "type": "string", "description": "Text to enter" },
+                    "clear_first": { "type": "boolean", "description": "Clear existing text first (default true)" },
+                    "submit": { "type": "boolean", "description": "Submit after typing (Enter + form submit)" }
+                },
+                "required": ["index", "text"]
+            }
+            """.trimIndent()
+        ),
+        AIToolDefinition(
+            name = "tap",
+            description = "Fallback: taps the page at viewport coordinates (x, y), clicking whatever element is there. Prefer click_element with an observation index; use tap only for canvas/image-only areas located via screenshot.",
+            parametersSchemaJson = """
+            {
+                "type": "object",
+                "properties": {
+                    "x": { "type": "integer", "description": "Viewport x coordinate" },
+                    "y": { "type": "integer", "description": "Viewport y coordinate" }
+                },
+                "required": ["x", "y"]
+            }
+            """.trimIndent()
+        ),
+        AIToolDefinition(
+            name = "browser_back",
+            description = "Navigates the browser back one page in history.",
+            parametersSchemaJson = """{ "type": "object", "properties": {} }"""
+        ),
+        AIToolDefinition(
+            name = "browser_forward",
+            description = "Navigates the browser forward one page in history.",
+            parametersSchemaJson = """{ "type": "object", "properties": {} }"""
+        ),
+        AIToolDefinition(
+            name = "browser_reload",
+            description = "Reloads the current page.",
+            parametersSchemaJson = """{ "type": "object", "properties": {} }"""
+        ),
+        AIToolDefinition(
+            name = "wait_for_load",
+            description = "Waits until the page finishes loading (document ready), up to the timeout. Use after actions that trigger slow page transitions.",
+            parametersSchemaJson = """
+            {
+                "type": "object",
+                "properties": {
+                    "timeout_ms": { "type": "integer", "description": "Maximum wait in milliseconds (default 8000)" }
+                }
+            }
+            """.trimIndent()
+        ),
+        AIToolDefinition(
             name = "click",
-            description = "Clicks an element identified by CSS selector in the browser.",
+            description = "Clicks an element identified by CSS selector in the browser. Prefer observe_page + click_element (index-based); use this only when you already know a stable selector.",
             parametersSchemaJson = """
             {
                 "type": "object",
@@ -68,7 +143,7 @@ object ToolDefinitions {
         ),
         AIToolDefinition(
             name = "type",
-            description = "Types text into a form input field identified by CSS selector.",
+            description = "Types text into a form input field identified by CSS selector. Prefer observe_page + type_text (index-based, supports submit); use this only when you already know a stable selector.",
             parametersSchemaJson = """
             {
                 "type": "object",

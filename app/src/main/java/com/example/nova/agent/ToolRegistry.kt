@@ -62,6 +62,9 @@ class ToolRegistry(
                 val lower = argumentsJson.lowercase()
                 lower.contains("submit") || lower.contains("buy") || lower.contains("pay") || lower.contains("order") || lower.contains("delete")
             }
+            // "type_text" is deliberately not sensitive: its arguments carry
+            // no target-field identity (just an observation index), and a
+            // search submit must not stall the task on an approval prompt.
             else -> false
         }
     }

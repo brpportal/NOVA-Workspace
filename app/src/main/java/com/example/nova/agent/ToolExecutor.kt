@@ -85,6 +85,46 @@ class ToolExecutor(
                     val res = browserController.getPageState()
                     ToolExecutionResult(res.success, res.data ?: "{}", error = res.error)
                 }
+                "observe_page" -> {
+                    val observation = browserController.observePage()
+                    ToolExecutionResult(true, observation.formatForModel())
+                }
+                "click_element" -> {
+                    val index = arguments.getInt("index")
+                    val res = browserController.clickElement(index)
+                    ToolExecutionResult(res.success, res.message, error = res.error)
+                }
+                "type_text" -> {
+                    val index = arguments.getInt("index")
+                    val text = arguments.getString("text")
+                    val clearFirst = arguments.optBoolean("clear_first", true)
+                    val submit = arguments.optBoolean("submit", false)
+                    val res = browserController.typeText(index, text, clearFirst, submit)
+                    ToolExecutionResult(res.success, res.message + (res.data?.let { " ($it)" } ?: ""), error = res.error)
+                }
+                "tap" -> {
+                    val x = arguments.getInt("x")
+                    val y = arguments.getInt("y")
+                    val res = browserController.tapAt(x, y)
+                    ToolExecutionResult(res.success, res.message, error = res.error)
+                }
+                "browser_back" -> {
+                    val res = browserController.goBackAction()
+                    ToolExecutionResult(res.success, res.message, error = res.error)
+                }
+                "browser_forward" -> {
+                    val res = browserController.goForwardAction()
+                    ToolExecutionResult(res.success, res.message, error = res.error)
+                }
+                "browser_reload" -> {
+                    val res = browserController.reloadAction()
+                    ToolExecutionResult(res.success, res.message, error = res.error)
+                }
+                "wait_for_load" -> {
+                    val timeout = arguments.optLong("timeout_ms", 8000)
+                    val res = browserController.waitForLoad(timeout)
+                    ToolExecutionResult(res.success, res.message, error = res.error)
+                }
                 "get_set_of_marks" -> {
                     val marks = browserController.injectSetOfMarks()
                     val jsonArr = org.json.JSONArray()
