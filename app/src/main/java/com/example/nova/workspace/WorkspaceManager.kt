@@ -106,28 +106,33 @@ class WorkspaceManager(
             }
         }
         // Write initial welcome README if empty
+        val welcomeText = """# Welcome to Spark
+        |
+        |Your standalone native AI workspace is ready.
+        |All files in this workspace are stored locally on your device.
+        |
+        |### Folders:
+        |- **Projects/**: Workspace projects and artifacts
+        |- **Research/**: Notes and extracted research findings
+        |- **Documents/**: User notes, reports, and markdown files
+        |- **Images/**: Screenshots and visual media
+        |- **Code/**: Scripts and technical files
+        |- **Downloads/**: Files downloaded via embedded browser
+        |- **Memory/**: Persistent facts (Memory.md) & AI procedures (Training.md)
+        |- **AI-Tasks/**: Autonomous task executions, artifacts, and replay logs
+        |- **Exports/**: Generated CSV, summaries, and backups
+        |
+        |Explore, edit, and let the AI agent work securely within this directory!
+        """.trimMargin()
         val readme = File(rootDir, "Documents/Welcome.md")
         if (!readme.exists()) {
-            readme.writeText(
-                """# Welcome to Spark
-                |
-                |Your standalone native AI workspace is ready.
-                |All files in this workspace are stored locally on your device.
-                |
-                |### Folders:
-                |- **Projects/**: Workspace projects and artifacts
-                |- **Research/**: Notes and extracted research findings
-                |- **Documents/**: User notes, reports, and markdown files
-                |- **Images/**: Screenshots and visual media
-                |- **Code/**: Scripts and technical files
-                |- **Downloads/**: Files downloaded via embedded browser
-                |- **Memory/**: Persistent facts (Memory.md) & AI procedures (Training.md)
-                |- **AI-Tasks/**: Autonomous task executions, artifacts, and replay logs
-                |- **Exports/**: Generated CSV, summaries, and backups
-                |
-                |Explore, edit, and let the AI agent work securely within this directory!
-                """.trimMargin()
-            )
+            readme.writeText(welcomeText)
+        }
+        // The root README.md explains the workspace layout at the top level
+        // (fix-round seeding behaviour, covered by WorkspaceSeedingTest).
+        val rootReadme = File(rootDir, "README.md")
+        if (!rootReadme.exists()) {
+            rootReadme.writeText(welcomeText)
         }
 
         // Initialize Memory.md if not present
