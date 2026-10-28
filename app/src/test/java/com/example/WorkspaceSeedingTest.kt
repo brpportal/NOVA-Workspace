@@ -51,8 +51,36 @@ class WorkspaceSeedingTest {
 
     @Test
     fun `environment pack metadata is consistent`() {
-        assertEquals(6, WorkspaceManager.ENVIRONMENT_FILES.size)
+        // Pack v2 (Phase 3): 8 SKILL.md files — the 6 converted pack docs
+        // plus phone-agent-playbook and research-with-sources.
+        assertEquals(8, WorkspaceManager.ENVIRONMENT_FILES.size)
         assertTrue(WorkspaceManager.ENVIRONMENT_PACK_BYTES > 0)
         assertTrue(WorkspaceManager.environmentPackSizeLabel().endsWith("MB"))
+        for (path in WorkspaceManager.ENVIRONMENT_FILES) {
+            assertTrue("pack file must be a skill: $path", path.startsWith("skills/") && path.endsWith("/SKILL.md"))
+        }
+    }
+
+    @Test
+    fun `environment pack installs skills and never overwrites edits`() {
+        val root = tmp.newFolder("ws3")
+        val wm = WorkspaceManager(root)
+        wm.initializeDefaultStructure()
+
+        val installed = wm.installEnvironmentPack()
+        assertEquals(WorkspaceManager.ENVIRONMENT_FILES.size, installed)
+        assertTrue(wm.isEnvironmentInstalled())
+        for (path in WorkspaceManager.ENVIRONMENT_FILES) {
+            val f = File(root, path)
+            assertTrue("missing installed skill $path", f.isFile)
+            assertTrue("skill $path must carry front matter", f.readText().startsWith("---\nname: "))
+        }
+
+        // A user edit to an installed skill must survive a reinstall.
+        val skill = File(root, "skills/agent-core/SKILL.md")
+        skill.writeText("MY EDITED SKILL")
+        val reinstalled = wm.installEnvironmentPack()
+        assertEquals(0, reinstalled)
+        assertEquals("MY EDITED SKILL", skill.readText())
     }
 }

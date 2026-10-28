@@ -1,3 +1,8 @@
+---
+name: agent-training
+when_to_use: When following or teaching procedures in Memory/Training.md — step-by-step workflows the agent must execute literally.
+---
+
 # AI Agent Training & Procedures
 
 *Step-by-step procedures, taught user workflows, and behavioral rules.

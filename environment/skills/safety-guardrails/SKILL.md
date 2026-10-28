@@ -1,3 +1,8 @@
+---
+name: safety-guardrails
+when_to_use: Whenever an action is sensitive, destructive, involves secrets, or needs user approval — and whenever a result must be reported honestly.
+---
+
 # Safety & Permission Rules
 
 Spark's permission system decides what the agent may do on its own, what needs the

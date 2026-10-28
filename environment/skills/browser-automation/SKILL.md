@@ -1,3 +1,8 @@
+---
+name: browser-automation
+when_to_use: Whenever a task drives the embedded browser — navigating, reading pages, clicking, typing, or handing control to the user.
+---
+
 # Browser Playbook
 
 How the agent should drive the embedded browser. The same rules apply whether the

@@ -1,3 +1,8 @@
+---
+name: personal-memory
+when_to_use: When reading or proposing updates to Memory/Memory.md — the durable facts and preferences Spark keeps about the user.
+---
+
 # Personal AI Memory
 
 *Persistent facts, user preferences, and important context for the Spark agent.

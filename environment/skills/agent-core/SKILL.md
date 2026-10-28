@@ -1,3 +1,8 @@
+---
+name: agent-core
+when_to_use: Always active — defines Spark identity, scope, chat-vs-task routing and operating principles for every conversation and task.
+---
+
 # Spark Agent — Core Behavior Rules
 
 These rules ship with the app as part of the Environment pack and describe how the

@@ -1,3 +1,8 @@
+---
+name: task-template
+when_to_use: When writing the task.md record for a task run under AI-Tasks/ — the fixed structure for goal, plan, steps and result summary.
+---
+
 # Task: <folder name>
 
 - **Status**: <PENDING | RUNNING | WAITING_APPROVAL | COMPLETED | FAILED | CANCELLED>

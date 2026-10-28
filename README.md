@@ -68,27 +68,50 @@ never presented as if a model answered.
 
 The app bundles its agent environment files and installs them into the
 workspace from the **Files** tab: the **Install Environment** card shows the
-pack's exact size (computed from the bundled contents) and writes `AGENT.md`
-(core behavior rules), `BROWSER.md` (browser playbook), `SAFETY.md`
-(permission & approval rules) and `TASK_TEMPLATE.md` into the workspace root,
-plus the `Memory.md` / `Training.md` starters into `Memory/`. Installing
-**never overwrites an existing file** — edited files are always kept — and a
-`.environment-installed` marker records the install (the card then offers
-"Reinstall Environment"). It is a purely local copy and works offline.
+pack's exact size (computed from the bundled contents) and writes the pack
+as eight `SKILL.md` files under `skills/<name>/` in the workspace — each
+with a front-matter header (`name` + `when_to_use`) followed by its
+instructions: `agent-core`, `browser-automation`, `safety-guardrails`,
+`task-template`, `personal-memory`, `agent-training`, plus the newer
+`phone-agent-playbook` (observe → plan → act → verify) and
+`research-with-sources` (collect titles/URLs, present them as sources).
+Installing **never overwrites an existing file** — edited files are always
+kept — and a `.environment-installed` marker records the install (the card
+then offers "Reinstall Environment"). It is a purely local copy and works
+offline.
 
 A human-readable reference copy of the environment pack is kept in the
-repo's `environment/` folder, mirrored at `app/src/main/assets/environment/`.
+repo's `environment/skills/` folder, mirrored at
+`app/src/main/assets/environment/skills/`.
 The workspace itself is seeded on first launch with the standard folders, a
 root `README.md` explaining the layout, the Memory/Training starters, and
 `AI-Tasks/index.md` — seeding is idempotent and never overwrites edits.
 
 ## Provider notes (Fetch Models & Test Connection)
 
-- **Fetch Models** calls `GET {baseUrl}/models` with your key. An HTTP 200
-  with an **empty** list is shown as an info note, not an error — some
-  providers/plans (e.g. an exhausted free plan) return `{"data": []}` — and
-  you can always type a model name manually in the Active Model field.
-  Non-200 responses show the real HTTP status code.
+- **Provider profiles** (Settings → AI Engine): OpenRouter, Hugging Face,
+  OpenAI-Compatible, Anthropic Claude, Google Gemini and Custom. Selecting
+  a profile auto-fills its Base URL (`https://openrouter.ai/api/v1`,
+  `https://router.huggingface.co/v1`, …); Custom leaves the Base URL freely
+  editable. The chosen profile is persisted. If the profile family and the
+  Base URL host disagree (e.g. Anthropic profile with an OpenRouter URL),
+  an inline warning is shown.
+- **Pasted API keys are sanitized** on save/fetch/test: invisible and
+  non-ASCII characters (a common paste accident) are stripped, with a
+  one-line note saying how many were removed — so a bad paste can no longer
+  produce a raw "Unexpected char … in Authorization value" error anywhere
+  in the UI.
+- **Fetch Models** calls `GET {baseUrl}/models` with your key and shows a
+  selectable list; tapping a model makes it the Active Model (manual entry
+  stays available). A model gets a **FREE** tag only from the provider's
+  own data: an id ending in `:free`, or pricing with prompt **and**
+  completion both `0` (OpenRouter). Providers that return no free signal
+  (e.g. Hugging Face) show no tags. An HTTP 200 with an **empty** list is
+  shown as an info note, not an error — some providers/plans (e.g. an
+  exhausted free plan) return `{"data": []}` — and you can always type a
+  model name manually in the Active Model field. Non-200 responses show
+  the real HTTP status code. The chat screen's model chip opens the same
+  fetch-and-switch flow.
 - **Test Connection** sends a minimal chat request (`ping`) with the
   configured model and reports the real outcome — success with latency, or
   the real HTTP status and error body. A manually typed model name that does
