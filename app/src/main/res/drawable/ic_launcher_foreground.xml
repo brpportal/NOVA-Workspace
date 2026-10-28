@@ -1,7 +1,8 @@
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp" android:height="108dp"
-    android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#FFFFFF"
-        android:pathData="M32,76 L32,32 L76,76 L76,32"
-        android:strokeWidth="8" android:strokeColor="#FFFFFF" />
-</vector>
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:width="66dp"
+        android:height="66dp"
+        android:drawable="@drawable/nova_logo_icon_1793154279249"
+        android:gravity="center" />
+</layer-list>
