@@ -9,7 +9,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35]) // Robolectric 4.16.1 does not support SDK 36 (UnsupportedOperationException in DefaultSdkProvider); run on SDK 35 sandbox
+@Config(sdk = [35])
 class ExampleRobolectricTest {
 
   @Test

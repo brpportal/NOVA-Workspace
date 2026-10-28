@@ -28,3 +28,20 @@ enum class FileSortOption {
     SIZE_DESC,
     SIZE_ASC
 }
+
+enum class FileViewMode {
+    LIST,
+    GRID
+}
+
+enum class FileCategory {
+    FOLDER,
+    DOCUMENT,
+    MARKDOWN,
+    CODE,
+    IMAGE,
+    DATA,
+    MEDIA,
+    OTHER
+}
+

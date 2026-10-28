@@ -21,6 +21,10 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import com.example.nova.workspace.WorkspaceManager
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -32,6 +36,7 @@ class AgentLoop(
     private val contextBuilder: ContextBuilder,
     private val permissionManager: PermissionManager,
     private val browserController: BrowserController,
+    private val workspaceManager: WorkspaceManager,
     private val maxStepsLimit: Int = 25
 ) {
     // Map of active running jobs per taskId
@@ -67,6 +72,10 @@ class AgentLoop(
         var stepNumber = 1
         var duplicateCount = 0
         var lastToolCallSignature = ""
+        val stepsRecord = mutableListOf<String>()
+        val logBuffer = StringBuilder()
+
+        browserController.setPlanAndStep("Autonomous Task: ${task.title}", "Starting execution")
 
         try {
             while (stepNumber <= maxStepsLimit && currentCoroutineContext().isActive) {
@@ -201,6 +210,10 @@ class AgentLoop(
                         status = if (result.success) "SUCCESS" else "FAILED"
                     )
 
+                    stepsRecord.add("${toolCall.name}: ${if (result.success) "Success" else "Failed"} - ${result.output.take(80)}")
+                    logBuffer.append("[${Date()}] Step ${stepNumber - 1}: ${toolCall.name} -> ${result.output.take(120)}\n")
+                    browserController.setPlanAndStep("Task: ${task.title}", "Step ${stepNumber - 1}: ${toolCall.name}")
+
                     taskDao.insertToolExecution(
                         ToolExecutionEntity(
                             taskId = taskId,
@@ -249,6 +262,25 @@ class AgentLoop(
             )
             taskDao.updateTask(currentTask)
         } finally {
+            try {
+                val datePrefix = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+                val cleanTitle = task.title.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(25).trimEnd('_')
+                val folderName = "${datePrefix}_$cleanTitle"
+                workspaceManager.saveTaskRun(
+                    taskFolderName = folderName,
+                    goal = task.prompt,
+                    plan = browserController.currentPlan.value,
+                    status = currentTask.status,
+                    steps = stepsRecord,
+                    logText = logBuffer.toString(),
+                    resultSummary = currentTask.currentOperation
+                )
+                workspaceManager.updateTaskIndex(
+                    taskFolderName = folderName,
+                    status = currentTask.status,
+                    summary = currentTask.currentOperation
+                )
+            } catch (ignored: Exception) {}
             activeJobs.remove(taskId)
         }
     }

@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.webkit.ValueCallback
 import android.webkit.WebView
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +32,30 @@ class BrowserController {
     private val _manualControlMessage = MutableStateFlow<String?>(null)
     val manualControlMessage: StateFlow<String?> = _manualControlMessage.asStateFlow()
 
+    // AI Virtual Cursor & Keystroke live overlay
+    private val _aiCursorState = MutableStateFlow(AICursorState())
+    val aiCursorState: StateFlow<AICursorState> = _aiCursorState.asStateFlow()
+
+    private val _aiKeystrokeState = MutableStateFlow(AIKeystrokeState())
+    val aiKeystrokeState: StateFlow<AIKeystrokeState> = _aiKeystrokeState.asStateFlow()
+
+    // Live Agent Plan & Reasoning Log for side panel
+    private val _currentPlan = MutableStateFlow("Ready for autonomous task.")
+    val currentPlan: StateFlow<String> = _currentPlan.asStateFlow()
+
+    private val _currentStep = MutableStateFlow("Idle")
+    val currentStep: StateFlow<String> = _currentStep.asStateFlow()
+
+    private val _actionLogs = MutableStateFlow<List<String>>(emptyList())
+    val actionLogs: StateFlow<List<String>> = _actionLogs.asStateFlow()
+
+    // Teach Mode state
+    private val _isTeachModeActive = MutableStateFlow(false)
+    val isTeachModeActive: StateFlow<Boolean> = _isTeachModeActive.asStateFlow()
+
+    private val _recordedActions = MutableStateFlow<List<TeachModeAction>>(emptyList())
+    val recordedActions: StateFlow<List<TeachModeAction>> = _recordedActions.asStateFlow()
+
     fun bindWebView(webView: WebView) {
         webViewRef = WeakReference(webView)
     }
@@ -45,6 +70,34 @@ class BrowserController {
 
     fun updateControlMode(mode: BrowserControlMode) {
         _controlMode.value = mode
+    }
+
+    fun setPlanAndStep(plan: String, step: String) {
+        _currentPlan.value = plan
+        _currentStep.value = step
+    }
+
+    fun logAction(entry: String) {
+        val current = _actionLogs.value.toMutableList()
+        current.add(0, entry)
+        if (current.size > 50) current.removeAt(current.size - 1)
+        _actionLogs.value = current
+    }
+
+    fun updateCursor(x: Float, y: Float, isClicking: Boolean, label: String = "AI") {
+        _aiCursorState.value = AICursorState(isVisible = true, x = x, y = y, isClicking = isClicking, label = label)
+    }
+
+    fun hideCursor() {
+        _aiCursorState.value = AICursorState(isVisible = false)
+    }
+
+    fun showKeystrokes(text: String) {
+        _aiKeystrokeState.value = AIKeystrokeState(text = text, timestamp = System.currentTimeMillis(), isVisible = true)
+    }
+
+    fun hideKeystrokes() {
+        _aiKeystrokeState.value = AIKeystrokeState(isVisible = false)
     }
 
     // --- MANUAL CONTROL & TAKE CONTROL LIFECYCLE ---
@@ -214,6 +267,31 @@ class BrowserController {
             return BrowserActionResult(false, "Blocked: Manual control active.")
         }
         val escaped = JSONObject.quote(selector)
+        // First locate target coordinate to animate the virtual AI cursor
+        val coordJs = """
+            (function() {
+                try {
+                    var el = document.querySelector($escaped);
+                    if (!el) return null;
+                    var r = el.getBoundingClientRect();
+                    return JSON.stringify({ x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) });
+                } catch(e) { return null; }
+            })();
+        """.trimIndent()
+        val coordRaw = evaluateJs(coordJs)
+        if (!coordRaw.isNullOrBlank() && coordRaw != "null") {
+            try {
+                val cleanCoord = unescapeJsString(coordRaw)
+                val cObj = JSONObject(cleanCoord)
+                val cx = cObj.getInt("x").toFloat()
+                val cy = cObj.getInt("y").toFloat()
+                updateCursor(cx, cy, isClicking = false)
+                delay(120)
+                updateCursor(cx, cy, isClicking = true)
+                delay(80)
+            } catch (e: Exception) {}
+        }
+
         val js = """
             (function() {
                 try {
@@ -230,6 +308,9 @@ class BrowserController {
         val raw = evaluateJs(js) ?: "{}"
         val clean = unescapeJsString(raw)
         val success = clean.contains("\"success\":true")
+        logAction(if (success) "AI clicked $selector" else "AI failed click on $selector")
+        delay(100)
+        hideCursor()
         return BrowserActionResult(success = success, message = if (success) "Clicked $selector" else "Failed to click $selector", data = clean)
     }
 
@@ -237,6 +318,7 @@ class BrowserController {
         if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
             return BrowserActionResult(false, "Blocked: Manual control active.")
         }
+        showKeystrokes(text)
         val escapedSel = JSONObject.quote(selector)
         val escapedText = JSONObject.quote(text)
         val js = """
@@ -259,7 +341,182 @@ class BrowserController {
         val raw = evaluateJs(js) ?: "{}"
         val clean = unescapeJsString(raw)
         val success = clean.contains("\"success\":true")
+        logAction(if (success) "AI typed into $selector: \"$text\"" else "AI failed typing into $selector")
+        delay(300)
+        hideKeystrokes()
         return BrowserActionResult(success = success, message = if (success) "Typed into $selector" else "Failed to type into $selector", data = clean)
+    }
+
+    suspend fun injectSetOfMarks(): List<InteractiveElement> = withContext(Dispatchers.Main) {
+        val js = """
+            (function() {
+                try {
+                    var old = document.querySelectorAll('.nova-som-marker');
+                    for (var i = 0; i < old.length; i++) old[i].remove();
+                    
+                    var selectors = 'a, button, input, select, textarea, [role=button], [role=link], [onclick]';
+                    var elements = document.querySelectorAll(selectors);
+                    var results = [];
+                    var markId = 1;
+                    for (var i = 0; i < elements.length && markId <= 40; i++) {
+                        var el = elements[i];
+                        var rect = el.getBoundingClientRect();
+                        if (rect.width > 12 && rect.height > 12 && rect.top >= -50 && rect.top <= window.innerHeight + 50) {
+                            el.setAttribute('data-nova-id', markId);
+                            var badge = document.createElement('div');
+                            badge.className = 'nova-som-marker';
+                            badge.innerText = markId;
+                            badge.style.position = 'absolute';
+                            badge.style.left = (rect.left + window.scrollX) + 'px';
+                            badge.style.top = (rect.top + window.scrollY) + 'px';
+                            badge.style.backgroundColor = '#D96B27';
+                            badge.style.color = '#FFFFFF';
+                            badge.style.fontSize = '10px';
+                            badge.style.fontWeight = 'bold';
+                            badge.style.padding = '1px 5px';
+                            badge.style.borderRadius = '8px';
+                            badge.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3)';
+                            badge.style.zIndex = '999999';
+                            badge.style.pointerEvents = 'none';
+                            document.body.appendChild(badge);
+                            
+                            var txt = (el.innerText || el.value || el.getAttribute('aria-label') || el.placeholder || '').trim();
+                            results.push({
+                                id: markId,
+                                tagName: el.tagName,
+                                text: txt.substring(0, 50),
+                                x: Math.round(rect.left + rect.width / 2),
+                                y: Math.round(rect.top + rect.height / 2),
+                                width: Math.round(rect.width),
+                                height: Math.round(rect.height),
+                                selector: '[data-nova-id="' + markId + '"]'
+                            });
+                            markId++;
+                        }
+                    }
+                    return JSON.stringify(results);
+                } catch(e) {
+                    return JSON.stringify([]);
+                }
+            })();
+        """.trimIndent()
+        val raw = evaluateJs(js) ?: "[]"
+        val clean = unescapeJsString(raw)
+        val list = mutableListOf<InteractiveElement>()
+        try {
+            val arr = org.json.JSONArray(clean)
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    InteractiveElement(
+                        id = obj.getInt("id"),
+                        tagName = obj.getString("tagName"),
+                        text = obj.optString("text", ""),
+                        x = obj.getInt("x"),
+                        y = obj.getInt("y"),
+                        width = obj.getInt("width"),
+                        height = obj.getInt("height"),
+                        selector = obj.getString("selector")
+                    )
+                )
+            }
+        } catch (e: Exception) {}
+        list
+    }
+
+    suspend fun clearSetOfMarks(): BrowserActionResult {
+        val js = """
+            (function() {
+                try {
+                    var old = document.querySelectorAll('.nova-som-marker');
+                    for (var i = 0; i < old.length; i++) old[i].remove();
+                    return JSON.stringify({success: true});
+                } catch(e) {
+                    return JSON.stringify({success: false, error: e.toString()});
+                }
+            })();
+        """.trimIndent()
+        evaluateJs(js)
+        return BrowserActionResult(true, "Set-of-Marks cleared")
+    }
+
+    suspend fun startTeachMode(): BrowserActionResult {
+        _isTeachModeActive.value = true
+        _recordedActions.value = emptyList()
+        val js = """
+            (function() {
+                if (window._novaTeachInjected) return 'already_injected';
+                window._novaTeachInjected = true;
+                window._novaRecorded = [];
+                document.addEventListener('click', function(e) {
+                    var el = e.target;
+                    var sel = el.id ? '#' + el.id : (el.className ? '.' + el.className.split(' ')[0] : el.tagName.toLowerCase());
+                    window._novaRecorded.push({
+                        type: 'CLICK',
+                        target: sel,
+                        value: (el.innerText || '').substring(0, 30),
+                        timestamp: Date.now()
+                    });
+                }, true);
+                document.addEventListener('change', function(e) {
+                    var el = e.target;
+                    var sel = el.id ? '#' + el.id : (el.name ? '[name="' + el.name + '"]' : el.tagName.toLowerCase());
+                    window._novaRecorded.push({
+                        type: 'TYPE',
+                        target: sel,
+                        value: el.value,
+                        timestamp: Date.now()
+                    });
+                }, true);
+                return 'injected';
+            })();
+        """.trimIndent()
+        evaluateJs(js)
+        logAction("Teach Mode activated. Recording interactions.")
+        return BrowserActionResult(true, "Teach Mode activated.")
+    }
+
+    suspend fun stopTeachMode(workspaceManager: com.example.nova.workspace.WorkspaceManager): BrowserActionResult {
+        _isTeachModeActive.value = false
+        val js = """
+            (function() {
+                var rec = window._novaRecorded || [];
+                window._novaRecorded = [];
+                return JSON.stringify(rec);
+            })();
+        """.trimIndent()
+        val raw = evaluateJs(js) ?: "[]"
+        val clean = unescapeJsString(raw)
+        val actions = mutableListOf<TeachModeAction>()
+        try {
+            val arr = org.json.JSONArray(clean)
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                actions.add(
+                    TeachModeAction(
+                        type = obj.getString("type"),
+                        target = obj.getString("target"),
+                        value = obj.optString("value", null),
+                        timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+                    )
+                )
+            }
+        } catch (e: Exception) {}
+
+        _recordedActions.value = actions
+        if (actions.isNotEmpty()) {
+            val workflowContent = buildString {
+                append("\n\n### Taught Workflow (${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date())})\n")
+                actions.forEachIndexed { idx, act ->
+                    append("${idx + 1}. ${act.type} on `${act.target}`")
+                    if (!act.value.isNullOrBlank()) append(" with value \"${act.value}\"")
+                    append("\n")
+                }
+            }
+            workspaceManager.appendFile("Memory/Training.md", workflowContent)
+            logAction("Saved ${actions.size} actions to Memory/Training.md")
+        }
+        return BrowserActionResult(true, "Teach Mode stopped. Recorded ${actions.size} actions.")
     }
 
     suspend fun selectOption(selector: String, optionValue: String): BrowserActionResult {

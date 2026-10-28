@@ -85,6 +85,32 @@ class ToolExecutor(
                     val res = browserController.getPageState()
                     ToolExecutionResult(res.success, res.data ?: "{}", error = res.error)
                 }
+                "get_set_of_marks" -> {
+                    val marks = browserController.injectSetOfMarks()
+                    val jsonArr = org.json.JSONArray()
+                    for (m in marks) {
+                        jsonArr.put(JSONObject().apply {
+                            put("id", m.id)
+                            put("tag", m.tagName)
+                            put("text", m.text)
+                            put("x", m.x)
+                            put("y", m.y)
+                            put("selector", m.selector)
+                        })
+                    }
+                    ToolExecutionResult(true, jsonArr.toString())
+                }
+                "clear_set_of_marks" -> {
+                    val res = browserController.clearSetOfMarks()
+                    ToolExecutionResult(res.success, res.message, error = res.error)
+                }
+                "task_record_artifact" -> {
+                    val fileName = arguments.getString("file_name")
+                    val content = arguments.getString("content")
+                    val rel = "AI-Tasks/$fileName"
+                    val ok = workspaceManager.writeFile(rel, content)
+                    ToolExecutionResult(ok, if (ok) "Saved task artifact: $rel" else "Failed to save artifact", outputFiles = if (ok) listOf(rel) else emptyList())
+                }
 
                 // File tools
                 "file_list" -> {

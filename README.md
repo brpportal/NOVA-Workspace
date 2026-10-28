@@ -16,10 +16,11 @@ NOVA Workspace is a production-oriented, standalone native Android AI applicatio
 
 > **Note:** This download currently serves the verified **Milestone 1** APK (Release
 > [v0.1.0-m1](https://github.com/brpportal/NOVA-Workspace/releases/tag/v0.1.0-m1)).
-> The `main` branch now contains the **Google AI Studio implementation** described
-> below, which is under CI verification; a new release will be published from it
-> once its build is verified. The Milestone 1 code remains in this repo's git
-> history, and its release is untouched.
+> The `main` branch now contains the **Google AI Studio v2 update** described below
+> (File Manager crash fixes, UI redesign, custom AI provider profiles with
+> Fetch Models, on-device agent browser), which is under CI verification; a new
+> release will be published from it once its build is verified. Earlier code
+> remains in this repo's git history, and the Milestone 1 release is untouched.
 >
 > All releases: [github.com/brpportal/NOVA-Workspace/releases](https://github.com/brpportal/NOVA-Workspace/releases)
 

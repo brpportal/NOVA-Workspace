@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
@@ -26,7 +25,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -37,12 +35,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ui.theme.Charcoal600
-import com.example.ui.theme.Charcoal700
-import com.example.ui.theme.Charcoal900
-import com.example.ui.theme.NovaCyan
-import com.example.ui.theme.SlateMuted
-import com.example.ui.theme.TitaniumSilver
+import com.example.ui.theme.StoneMuted
+import com.example.ui.theme.WarmAccent
+import com.example.ui.theme.WarmAccentContainer
+import com.example.ui.theme.WarmAccentDark
+import com.example.ui.theme.WarmBorder
+import com.example.ui.theme.WarmCanvas
 
 @Composable
 fun MarkdownText(
@@ -59,9 +57,9 @@ fun MarkdownText(
                     Text(
                         text = block.text,
                         style = when (block.level) {
-                            1 -> MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold, color = NovaCyan)
-                            2 -> MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = TitaniumSilver)
-                            else -> MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold, color = TitaniumSilver)
+                            1 -> MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            2 -> MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                            else -> MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
                         },
                         modifier = Modifier.padding(vertical = 4.dp)
                     )
@@ -101,24 +99,25 @@ fun CodeSnippetCard(
     onCopy: () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = Charcoal900,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 6.dp)
-            .border(1.dp, Charcoal600, RoundedCornerShape(8.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
     ) {
         Column {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Charcoal700)
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = (language ?: "code").uppercase(),
-                    style = MaterialTheme.typography.labelSmall.copy(color = SlateMuted, fontWeight = FontWeight.Bold)
+                    style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 IconButton(
@@ -128,7 +127,7 @@ fun CodeSnippetCard(
                     Icon(
                         imageVector = Icons.Default.ContentCopy,
                         contentDescription = "Copy code",
-                        tint = NovaCyan,
+                        tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.padding(2.dp)
                     )
                 }
@@ -138,7 +137,7 @@ fun CodeSnippetCard(
                     text = code,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 13.sp,
-                    color = TitaniumSilver,
+                    color = MaterialTheme.colorScheme.onSurface,
                     lineHeight = 18.sp,
                     modifier = Modifier.padding(12.dp)
                 )
@@ -215,8 +214,8 @@ fun renderInlineMarkdown(raw: String): androidx.compose.ui.text.AnnotatedString 
                         withStyle(
                             SpanStyle(
                                 fontFamily = FontFamily.Monospace,
-                                background = Color(0xFF283141),
-                                color = Color(0xFF00E5FF)
+                                background = WarmAccentContainer,
+                                color = WarmAccentDark
                             )
                         ) {
                             append(" " + raw.substring(cursor + 1, end) + " ")

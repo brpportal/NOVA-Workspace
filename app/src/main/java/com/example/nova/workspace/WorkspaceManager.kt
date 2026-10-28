@@ -20,7 +20,8 @@ class WorkspaceManager(
             "Downloads",
             "Memory",
             "Tasks",
-            "Exports"
+            "Exports",
+            "AI-Tasks"
         )
 
         fun createDefault(context: Context): WorkspaceManager {
@@ -61,42 +62,120 @@ class WorkspaceManager(
                 |- **Images/**: Screenshots and visual media
                 |- **Code/**: Scripts and technical files
                 |- **Downloads/**: Files downloaded via embedded browser
+                |- **Memory/**: Persistent facts (Memory.md) & AI procedures (Training.md)
+                |- **AI-Tasks/**: Autonomous task executions, artifacts, and replay logs
                 |- **Exports/**: Generated CSV, summaries, and backups
                 |
                 |Explore, edit, and let the AI agent work securely within this directory!
                 """.trimMargin()
             )
         }
+
+        // Initialize Memory.md if not present
+        val memoryFile = File(rootDir, "Memory/Memory.md")
+        if (!memoryFile.exists()) {
+            memoryFile.writeText(
+                """# Personal AI Memory
+                |
+                |*Persistent facts, user preferences, and important context for NOVA Agent.*
+                |
+                |## User Profile
+                |- Primary focus: High-productivity native Android AI automation
+                |- Preferred communication style: Concise, direct, actionable
+                |- Default workspace folders: Projects, Research, Documents, Images, Code
+                |
+                |## Verified Accounts & Domains
+                |- Allowed sites: github.com, news.ycombinator.com, wikipedia.org, google.com
+                |
+                |## Key Project Notes
+                |- NOVA Workspace uses Android Keystore encryption for all credentials.
+                |- Vision models are preferred for browser navigation tasks.
+                """.trimMargin()
+            )
+        }
+
+        // Initialize Training.md if not present
+        val trainingFile = File(rootDir, "Memory/Training.md")
+        if (!trainingFile.exists()) {
+            trainingFile.writeText(
+                """# AI Agent Training & Procedures
+                |
+                |*Step-by-step procedures, taught user workflows, and behavioral rules.*
+                |
+                |## General Directives
+                |1. Always inspect page state and Set-of-Marks labels before clicking interactive elements.
+                |2. Capture a screenshot after significant page transitions or navigation steps.
+                |3. Never submit payment forms, destructive deletions, or sensitive account changes without user approval.
+                |4. When extracting information, organize findings in markdown under Research/ or Documents/.
+                |
+                |## Taught Workflows
+                |### Workflow: Search and Summarize
+                |1. Navigate to search engine or target domain.
+                |2. Find the primary search input, type query, and submit.
+                |3. Wait for search results, extract top relevant entries.
+                |4. Save summary to `/Research/search_summary.md`.
+                |
+                |### Workflow: Safe Web Interaction
+                |1. If CAPTCHA or 2FA appears, request 'Take Control' immediately.
+                |2. Do not attempt automated credential entry without explicit vault policy permission.
+                """.trimMargin()
+            )
+        }
+
+        // Initialize AI-Tasks index if not present
+        val indexFile = File(rootDir, "AI-Tasks/index.md")
+        if (!indexFile.exists()) {
+            indexFile.writeText(
+                """# AI Tasks Master Index
+                |
+                |Index of all autonomous agent tasks executed within NOVA Workspace.
+                |
+                || Date | Task Name | Status | Summary | Folder |
+                || --- | --- | --- | --- | --- |
+                """.trimMargin()
+            )
+        }
     }
 
-    private fun resolve(relativePath: String): File {
+    fun resolve(relativePath: String): File {
         return PathValidator.resolveCanonicalFile(rootDir, relativePath)
     }
 
     fun listFiles(subDirectory: String = "", sort: FileSortOption = FileSortOption.NAME_ASC): List<WorkspaceFile> {
-        val target = resolve(subDirectory)
-        if (!target.exists() || !target.isDirectory) return emptyList()
+        return try {
+            if (!rootDir.exists()) {
+                rootDir.mkdirs()
+                initializeDefaultStructure()
+            }
+            val target = resolve(subDirectory)
+            if (!target.exists()) {
+                if (subDirectory.isBlank()) target.mkdirs() else return emptyList()
+            }
+            if (!target.isDirectory) return emptyList()
 
-        val files = target.listFiles() ?: return emptyList()
-        val items = files.map { file ->
-            val rel = file.relativeTo(rootDir).path.replace('\\', '/')
-            WorkspaceFile(
-                relativePath = rel,
-                name = file.name,
-                isDirectory = file.isDirectory,
-                sizeBytes = if (file.isDirectory) 0 else file.length(),
-                lastModified = file.lastModified(),
-                extension = file.extension.lowercase()
-            )
-        }
+            val files = target.listFiles() ?: return emptyList()
+            val items = files.map { file ->
+                val rel = file.relativeTo(rootDir).path.replace('\\', '/')
+                WorkspaceFile(
+                    relativePath = rel,
+                    name = file.name,
+                    isDirectory = file.isDirectory,
+                    sizeBytes = if (file.isDirectory) 0 else file.length(),
+                    lastModified = file.lastModified(),
+                    extension = file.extension.lowercase()
+                )
+            }
 
-        return when (sort) {
-            FileSortOption.NAME_ASC -> items.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
-            FileSortOption.NAME_DESC -> items.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() })).reversed()
-            FileSortOption.DATE_DESC -> items.sortedWith(compareBy({ !it.isDirectory }, { -it.lastModified }))
-            FileSortOption.DATE_ASC -> items.sortedWith(compareBy({ !it.isDirectory }, { it.lastModified }))
-            FileSortOption.SIZE_DESC -> items.sortedWith(compareBy({ !it.isDirectory }, { -it.sizeBytes }))
-            FileSortOption.SIZE_ASC -> items.sortedWith(compareBy({ !it.isDirectory }, { it.sizeBytes }))
+            when (sort) {
+                FileSortOption.NAME_ASC -> items.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+                FileSortOption.NAME_DESC -> items.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() })).reversed()
+                FileSortOption.DATE_DESC -> items.sortedWith(compareBy({ !it.isDirectory }, { -it.lastModified }))
+                FileSortOption.DATE_ASC -> items.sortedWith(compareBy({ !it.isDirectory }, { it.lastModified }))
+                FileSortOption.SIZE_DESC -> items.sortedWith(compareBy({ !it.isDirectory }, { -it.sizeBytes }))
+                FileSortOption.SIZE_ASC -> items.sortedWith(compareBy({ !it.isDirectory }, { it.sizeBytes }))
+            }
+        } catch (e: Throwable) {
+            emptyList()
         }
     }
 
@@ -166,26 +245,30 @@ class WorkspaceManager(
     }
 
     fun searchFiles(query: String, startDir: String = ""): List<WorkspaceFile> {
-        val target = resolve(startDir)
-        if (!target.exists()) return emptyList()
-        val q = query.lowercase().trim()
+        return try {
+            val target = resolve(startDir)
+            if (!target.exists()) return emptyList()
+            val q = query.lowercase().trim()
 
-        val results = mutableListOf<WorkspaceFile>()
-        target.walkTopDown().forEach { file ->
-            if (file != target && file.name.lowercase().contains(q)) {
-                results.add(
-                    WorkspaceFile(
-                        relativePath = file.relativeTo(rootDir).path.replace('\\', '/'),
-                        name = file.name,
-                        isDirectory = file.isDirectory,
-                        sizeBytes = if (file.isDirectory) 0 else file.length(),
-                        lastModified = file.lastModified(),
-                        extension = file.extension.lowercase()
+            val results = mutableListOf<WorkspaceFile>()
+            target.walkTopDown().forEach { file ->
+                if (file != target && file.name.lowercase().contains(q)) {
+                    results.add(
+                        WorkspaceFile(
+                            relativePath = file.relativeTo(rootDir).path.replace('\\', '/'),
+                            name = file.name,
+                            isDirectory = file.isDirectory,
+                            sizeBytes = if (file.isDirectory) 0 else file.length(),
+                            lastModified = file.lastModified(),
+                            extension = file.extension.lowercase()
+                        )
                     )
-                )
+                }
             }
+            results
+        } catch (e: Throwable) {
+            emptyList()
         }
-        return results
     }
 
     fun getFileMetadata(relativePath: String): FileMetadata {
@@ -269,4 +352,113 @@ class WorkspaceManager(
             else -> "application/octet-stream"
         }
     }
+
+    fun readFileWithLimit(relativePath: String, maxBytes: Long = 2 * 1024 * 1024): String {
+        val target = resolve(relativePath)
+        if (!target.exists()) throw NoSuchFileException(target, null, "File does not exist: $relativePath")
+        if (target.isDirectory) throw IllegalArgumentException("Cannot read directory as file: $relativePath")
+        if (target.length() > maxBytes) {
+            target.inputStream().use { input ->
+                val buffer = ByteArray(maxBytes.toInt())
+                val read = input.read(buffer)
+                return String(buffer, 0, read, Charsets.UTF_8) + "\n\n... [File truncated for preview (size: ${formatReadableSize(target.length())})] ..."
+            }
+        }
+        return target.readText(Charsets.UTF_8)
+    }
+
+    fun importFromInputStream(inputStream: java.io.InputStream, relativePath: String): Boolean {
+        val target = resolve(relativePath)
+        target.parentFile?.mkdirs()
+        FileOutputStream(target).use { out ->
+            inputStream.copyTo(out)
+        }
+        return target.exists()
+    }
+
+    fun createTaskDirectory(taskFolderName: String): File {
+        val safeName = taskFolderName.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+        val dir = File(rootDir, "AI-Tasks/$safeName")
+        if (!dir.exists()) dir.mkdirs()
+        File(dir, "screenshots").mkdirs()
+        File(dir, "downloads").mkdirs()
+        return dir
+    }
+
+    fun saveTaskRun(
+        taskFolderName: String,
+        goal: String,
+        plan: String,
+        status: String,
+        steps: List<String>,
+        logText: String,
+        resultSummary: String
+    ) {
+        val dir = createTaskDirectory(taskFolderName)
+        val taskMd = File(dir, "task.md")
+        val content = """# Task: $taskFolderName
+        |
+        |- **Status**: $status
+        |- **Date**: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}
+        |
+        |## Goal
+        |$goal
+        |
+        |## Plan
+        |$plan
+        |
+        |## Steps Executed
+        |${steps.joinToString("\n") { "- $it" }}
+        |
+        |## Result Summary
+        |$resultSummary
+        """.trimMargin()
+        taskMd.writeText(content, Charsets.UTF_8)
+
+        val logFile = File(dir, "log.txt")
+        logFile.writeText(logText, Charsets.UTF_8)
+    }
+
+    fun updateTaskIndex(taskFolderName: String, status: String, summary: String) {
+        val indexFile = File(rootDir, "AI-Tasks/index.md")
+        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())
+        val cleanSummary = summary.replace("|", "/").replace("\n", " ").take(100)
+        val row = "| $dateStr | $taskFolderName | $status | $cleanSummary | [View](/AI-Tasks/$taskFolderName) |\n"
+        if (!indexFile.exists()) {
+            indexFile.writeText("# AI Tasks Master Index\n\n| Date | Task Name | Status | Summary | Folder |\n| --- | --- | --- | --- | --- |\n$row", Charsets.UTF_8)
+        } else {
+            FileOutputStream(indexFile, true).use {
+                it.write(row.toByteArray(Charsets.UTF_8))
+            }
+        }
+    }
+
+    fun backupMemoryFile(fileName: String) {
+        val src = resolve("Memory/$fileName")
+        if (!src.exists()) return
+        val backupDir = resolve("Memory/.backups")
+        backupDir.mkdirs()
+        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val backup = File(backupDir, "${fileName.substringBeforeLast('.')}_$ts.md")
+        src.copyTo(backup, overwrite = true)
+    }
+
+    fun listMemoryBackups(fileName: String): List<String> {
+        val backupDir = resolve("Memory/.backups")
+        if (!backupDir.exists() || !backupDir.isDirectory) return emptyList()
+        val prefix = fileName.substringBeforeLast('.')
+        return backupDir.listFiles()
+            ?.filter { it.name.startsWith(prefix) }
+            ?.map { it.name }
+            ?.sortedDescending() ?: emptyList()
+    }
+
+    fun restoreMemoryBackup(backupFileName: String, targetFileName: String): Boolean {
+        val backup = resolve("Memory/.backups/$backupFileName")
+        if (!backup.exists()) return false
+        val target = resolve("Memory/$targetFileName")
+        backup.copyTo(target, overwrite = true)
+        return true
+    }
 }
+

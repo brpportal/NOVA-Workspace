@@ -105,6 +105,30 @@ object ToolDefinitions {
             description = "Returns current webpage summary including form counts, inputs, buttons, and readiness.",
             parametersSchemaJson = """{ "type": "object", "properties": {} }"""
         ),
+        AIToolDefinition(
+            name = "get_set_of_marks",
+            description = "Overlays numbered visual labels on all clickable elements and returns element IDs, tags, text, and coordinates.",
+            parametersSchemaJson = """{ "type": "object", "properties": {} }"""
+        ),
+        AIToolDefinition(
+            name = "clear_set_of_marks",
+            description = "Removes the numbered visual labels from the browser webpage.",
+            parametersSchemaJson = """{ "type": "object", "properties": {} }"""
+        ),
+        AIToolDefinition(
+            name = "task_record_artifact",
+            description = "Saves an artifact (screenshot, extracted note, or file) to the active task folder in /AI-Tasks/.",
+            parametersSchemaJson = """
+            {
+                "type": "object",
+                "properties": {
+                    "file_name": { "type": "string", "description": "Name of artifact file (e.g. data.json, note.md)" },
+                    "content": { "type": "string", "description": "Text content to save" }
+                },
+                "required": ["file_name", "content"]
+            }
+            """.trimIndent()
+        ),
 
         // File Tools
         AIToolDefinition(

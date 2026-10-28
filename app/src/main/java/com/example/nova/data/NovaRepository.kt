@@ -45,7 +45,8 @@ class NovaRepository(
         toolExecutor = toolExecutor,
         contextBuilder = contextBuilder,
         permissionManager = permissionManager,
-        browserController = browserController
+        browserController = browserController,
+        workspaceManager = workspaceManager
     )
 
     // Reactive Flows

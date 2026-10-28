@@ -16,22 +16,99 @@ import java.util.concurrent.TimeUnit
 class OpenAICompatibleProvider(
     private val apiKey: String,
     private val model: String = "gpt-4o-mini",
-    private val endpoint: String = "https://api.openai.com/v1/chat/completions",
+    endpointOrBaseUrl: String = "https://api.openai.com/v1",
     private val timeoutSeconds: Long = 60
 ) : AIProviderAdapter {
     override val providerId: String = "openai_compatible"
     override val displayName: String = "OpenAI / Compatible ($model)"
+
+    val baseUrl: String = normalizeBaseUrl(endpointOrBaseUrl)
+    val endpoint: String = if (endpointOrBaseUrl.trim().endsWith("/chat/completions")) {
+        endpointOrBaseUrl.trim()
+    } else {
+        "$baseUrl/chat/completions"
+    }
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
         .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
         .build()
 
+    companion object {
+        fun normalizeBaseUrl(url: String): String {
+            var clean = url.trim().trimEnd('/')
+            if (clean.isBlank()) clean = "https://api.openai.com/v1"
+            if (clean.endsWith("/chat/completions")) {
+                clean = clean.removeSuffix("/chat/completions").trimEnd('/')
+            }
+            return clean
+        }
+
+        suspend fun fetchModels(baseUrl: String, apiKey: String, timeoutSeconds: Long = 15): List<String> = withContext(Dispatchers.IO) {
+            val cleanBase = normalizeBaseUrl(baseUrl)
+            val modelsUrl = "$cleanBase/models"
+            val client = OkHttpClient.Builder()
+                .connectTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                .build()
+
+            val reqBuilder = Request.Builder().url(modelsUrl)
+            if (apiKey.isNotBlank()) {
+                reqBuilder.addHeader("Authorization", "Bearer ${apiKey.trim()}")
+            }
+
+            client.newCall(reqBuilder.build()).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    throw IllegalStateException("HTTP ${response.code}: $body")
+                }
+
+                val modelList = mutableListOf<String>()
+                try {
+                    val root = JSONObject(body)
+                    val dataArr = root.optJSONArray("data") ?: root.optJSONArray("models")
+                    if (dataArr != null) {
+                        for (i in 0 until dataArr.length()) {
+                            val item = dataArr.get(i)
+                            if (item is JSONObject) {
+                                val id = item.optString("id").ifBlank { item.optString("name") }
+                                if (id.isNotBlank()) modelList.add(id)
+                            } else if (item is String && item.isNotBlank()) {
+                                modelList.add(item)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    // Try parsing as array directly
+                    try {
+                        val arr = JSONArray(body)
+                        for (i in 0 until arr.length()) {
+                            val item = arr.get(i)
+                            if (item is JSONObject) {
+                                val id = item.optString("id").ifBlank { item.optString("name") }
+                                if (id.isNotBlank()) modelList.add(id)
+                            } else if (item is String && item.isNotBlank()) {
+                                modelList.add(item)
+                            }
+                        }
+                    } catch (e2: Exception) {
+                        throw IllegalStateException("Failed to parse models JSON: ${e.message}")
+                    }
+                }
+
+                if (modelList.isEmpty()) {
+                    throw IllegalStateException("No models returned by $modelsUrl")
+                }
+                modelList.distinct().sorted()
+            }
+        }
+    }
+
     override fun validateConfiguration(): ProviderValidationResult {
         return if (apiKey.isBlank()) {
             ProviderValidationResult(false, "API key is required.")
-        } else if (endpoint.isBlank() || !endpoint.startsWith("http")) {
-            ProviderValidationResult(false, "Valid HTTP(S) endpoint is required.")
+        } else if (baseUrl.isBlank() || !baseUrl.startsWith("http")) {
+            ProviderValidationResult(false, "Valid HTTP(S) Base URL is required.")
         } else {
             ProviderValidationResult(true)
         }

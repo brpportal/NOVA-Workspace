@@ -6,17 +6,17 @@ import java.io.IOException
 object PathValidator {
     /**
      * Resolves and canonicalizes a path against the workspace root.
-     * Throws SecurityException if the target path attempts to escape the root.
+     * Prevents escaping the workspace directory while supporting normal filenames and special characters.
      */
     fun resolveCanonicalFile(root: File, relativeOrSubPath: String): File {
         val cleanSubPath = relativeOrSubPath.trim()
+            .replace('\\', '/')
             .removePrefix("/")
-            .removePrefix("\\")
 
-        // Explicit check against basic traversal patterns
-        if (cleanSubPath.contains("..") || cleanSubPath.startsWith("..") || cleanSubPath.endsWith("..")) {
-            val segments = cleanSubPath.split('/', '\\')
-            if (segments.any { it == ".." }) {
+        // Check if any path segment is explicitly ".."
+        val segments = cleanSubPath.split('/')
+        for (segment in segments) {
+            if (segment.trim() == "..") {
                 throw SecurityException("Access Denied: Path traversal detected ('..') in path '$relativeOrSubPath'")
             }
         }

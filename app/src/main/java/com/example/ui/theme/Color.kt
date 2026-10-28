@@ -2,29 +2,34 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Obsidian & Charcoal Dark Palette
-val Charcoal900 = Color(0xFF0C0E12) // Deepest background
-val Charcoal800 = Color(0xFF13171F) // Surface / Card background
-val Charcoal700 = Color(0xFF1C222D) // Elevated surface / Dialogs
-val Charcoal600 = Color(0xFF283141) // Border / Outline
-val Charcoal500 = Color(0xFF3B485E) // Subtle divider
+// Warm Off-White Palette (Clean & Premium AI Chat aesthetic)
+val WarmOffWhite = Color(0xFFFBF9F5)       // Main background (warm off-white)
+val WarmCanvas = Color(0xFFF5F2EB)         // Secondary warm canvas
+val WarmSurface = Color(0xFFFFFFFF)        // Crisp card surface
+val WarmSurfaceElevated = Color(0xFFF7F5EE)// Elevated surface
+val WarmBorder = Color(0xFFEBE6DD)         // Warm hairline card border
+val WarmBorderSubtle = Color(0xFFF0EBE2)   // Soft divider
 
-// Electric Cyan & Titanium Silver Accents
-val NovaCyan = Color(0xFF00E5FF)       // Primary brand highlight
-val NovaCyanContainer = Color(0xFF003842)
-val NovaCyanDim = Color(0xFF00B4D8)
-val TitaniumSilver = Color(0xFFE2E8F0) // Crisp light text / high contrast
-val SlateMuted = Color(0xFF94A3B8)     // Secondary / hint text
+// Signature Single Warm Accent (Rich Terracotta / Amber)
+val WarmAccent = Color(0xFFD96B27)         // Primary warm accent
+val WarmAccentContainer = Color(0xFFFAECE3)// Pill container / selection highlight
+val WarmAccentDark = Color(0xFFB85314)      // Active / pressed warm tone
+val WarmAccentMuted = Color(0xFFE89A6A)     // Lighter warm tone
 
-// Safety & Status Colors
-val SafetyRed = Color(0xFFFF453A)      // Error / Emergency stop
-val SafetyOrange = Color(0xFFFF9F0A)   // Warning / Manual control
-val SuccessGreen = Color(0xFF30D158)   // Approved / Success
-val PurpleAccent = Color(0xFFAF52DE)   // Vault / Cryptography
+// Typography & Content
+val CharcoalInk = Color(0xFF1C1A18)        // Primary text / deep ink
+val StoneMuted = Color(0xFF6E6861)         // Secondary text
+val StoneLight = Color(0xFF9E978E)         // Placeholder / timestamps
 
-// Clean Light Palette (Minimalist Charcoal/White)
-val PureWhite = Color(0xFFFFFFFF)
-val SnowLight = Color(0xFFF8FAFC)
-val PlatinumSurface = Color(0xFFEDF2F7)
-val SlateBorder = Color(0xFFCBD5E1)
-val SlateDarkText = Color(0xFF0F172A)
+// Status Colors (Warm-tuned)
+val WarmSuccess = Color(0xFF2E7D32)
+val WarmWarning = Color(0xFFD97706)
+val WarmError = Color(0xFFC62828)
+val WarmPurple = Color(0xFF7B3FA0)
+
+// Warm Dark Mode Counterpart (Warm Espresso Charcoal)
+val Espresso900 = Color(0xFF161514)
+val Espresso800 = Color(0xFF1F1D1B)
+val Espresso700 = Color(0xFF2A2825)
+val EspressoBorder = Color(0xFF3B3834)
+val WarmTitanium = Color(0xFFF2EFE9)

@@ -1,8 +1,6 @@
 package com.example.ui.theme
 
 import android.app.Activity
-import android.os.Build
-import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -13,55 +11,55 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-private val DarkColorScheme = darkColorScheme(
-    primary = NovaCyan,
-    onPrimary = Charcoal900,
-    primaryContainer = NovaCyanContainer,
-    onPrimaryContainer = NovaCyan,
-    secondary = SlateMuted,
-    onSecondary = TitaniumSilver,
-    secondaryContainer = Charcoal700,
-    onSecondaryContainer = TitaniumSilver,
-    tertiary = PurpleAccent,
-    onTertiary = TitaniumSilver,
-    background = Charcoal900,
-    onBackground = TitaniumSilver,
-    surface = Charcoal800,
-    onSurface = TitaniumSilver,
-    surfaceVariant = Charcoal700,
-    onSurfaceVariant = SlateMuted,
-    outline = Charcoal600,
-    outlineVariant = Charcoal500,
-    error = SafetyRed,
-    onError = PureWhite
+private val LightColorScheme = lightColorScheme(
+    primary = WarmAccent,
+    onPrimary = WarmSurface,
+    primaryContainer = WarmAccentContainer,
+    onPrimaryContainer = WarmAccentDark,
+    secondary = StoneMuted,
+    onSecondary = WarmSurface,
+    secondaryContainer = WarmCanvas,
+    onSecondaryContainer = CharcoalInk,
+    tertiary = WarmPurple,
+    onTertiary = WarmSurface,
+    background = WarmOffWhite,
+    onBackground = CharcoalInk,
+    surface = WarmSurface,
+    onSurface = CharcoalInk,
+    surfaceVariant = WarmCanvas,
+    onSurfaceVariant = StoneMuted,
+    outline = WarmBorder,
+    outlineVariant = WarmBorderSubtle,
+    error = WarmError,
+    onError = WarmSurface
 )
 
-private val LightColorScheme = lightColorScheme(
-    primary = Color(0xFF0284C7),
-    onPrimary = PureWhite,
-    primaryContainer = Color(0xFFE0F2FE),
-    onPrimaryContainer = Color(0xFF0369A1),
-    secondary = Color(0xFF475569),
-    onSecondary = PureWhite,
-    secondaryContainer = PlatinumSurface,
-    onSecondaryContainer = SlateDarkText,
-    tertiary = PurpleAccent,
-    onTertiary = PureWhite,
-    background = SnowLight,
-    onBackground = SlateDarkText,
-    surface = PureWhite,
-    onSurface = SlateDarkText,
-    surfaceVariant = PlatinumSurface,
-    onSurfaceVariant = Color(0xFF64748B),
-    outline = SlateBorder,
-    outlineVariant = Color(0xFFE2E8F0),
-    error = SafetyRed,
-    onError = PureWhite
+private val DarkColorScheme = darkColorScheme(
+    primary = WarmAccentMuted,
+    onPrimary = Espresso900,
+    primaryContainer = Espresso700,
+    onPrimaryContainer = WarmAccentContainer,
+    secondary = StoneLight,
+    onSecondary = Espresso900,
+    secondaryContainer = Espresso800,
+    onSecondaryContainer = WarmTitanium,
+    tertiary = WarmPurple,
+    onTertiary = WarmTitanium,
+    background = Espresso900,
+    onBackground = WarmTitanium,
+    surface = Espresso800,
+    onSurface = WarmTitanium,
+    surfaceVariant = Espresso700,
+    onSurfaceVariant = StoneLight,
+    outline = EspressoBorder,
+    outlineVariant = Espresso700,
+    error = WarmError,
+    onError = WarmTitanium
 )
 
 @Composable
 fun NovaWorkspaceTheme(
-    darkTheme: Boolean = true, // Default to sleek obsidian charcoal
+    darkTheme: Boolean = false, // Clean warm off-white by default as requested
     content: @Composable () -> Unit
 ) {
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
@@ -71,7 +69,7 @@ fun NovaWorkspaceTheme(
             val window = (view.context as? Activity)?.window
             if (window != null) {
                 window.statusBarColor = colorScheme.background.toArgb()
-                window.navigationBarColor = colorScheme.background.toArgb()
+                window.navigationBarColor = colorScheme.surface.toArgb()
                 WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
                 WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = !darkTheme
             }

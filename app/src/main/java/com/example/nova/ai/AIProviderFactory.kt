@@ -21,11 +21,11 @@ class AIProviderFactory {
                 }
                 "openai", "openai_compatible" -> {
                     val model = if (!modelName.isNullOrBlank()) modelName else "gpt-4o-mini"
-                    val ep = if (!endpoint.isNullOrBlank()) endpoint else "https://api.openai.com/v1/chat/completions"
+                    val ep = if (!endpoint.isNullOrBlank()) endpoint else "https://api.openai.com/v1"
                     OpenAICompatibleProvider(
                         apiKey = key,
                         model = model,
-                        endpoint = ep,
+                        endpointOrBaseUrl = ep,
                         timeoutSeconds = timeoutSeconds
                     )
                 }

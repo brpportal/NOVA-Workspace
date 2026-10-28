@@ -67,3 +67,32 @@ interface AIProviderAdapter {
     ): Flow<AIStreamChunk>
     fun getCapabilities(): ProviderCapabilities
 }
+
+data class ProviderProfile(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val name: String,
+    val providerType: String = "openai_compatible", // openai_compatible, anthropic, gemini, ollama, custom
+    val baseUrl: String = "https://api.openai.com/v1",
+    val apiKey: String = "",
+    val activeModel: String = "gpt-4o-mini",
+    val customHeadersJson: String = "{}",
+    val isVisionCapable: Boolean = true,
+    val isDefault: Boolean = false
+) {
+    companion object {
+        fun isVisionCapableModel(modelName: String): Boolean {
+            val lower = modelName.lowercase()
+            return lower.contains("vision") ||
+                   lower.contains("4o") ||
+                   lower.contains("flash") ||
+                   lower.contains("pro") ||
+                   lower.contains("claude-3") ||
+                   lower.contains("opus") ||
+                   lower.contains("sonnet") ||
+                   lower.contains("llava") ||
+                   lower.contains("qwen-vl") ||
+                   lower.contains("pixtral")
+        }
+    }
+}
+

@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,18 +23,15 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -46,7 +44,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -70,7 +67,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -79,17 +75,17 @@ import com.example.nova.data.ConversationEntity
 import com.example.nova.data.NovaRepository
 import com.example.nova.ui.components.MarkdownText
 import com.example.nova.ui.components.NovaScreen
-import com.example.ui.theme.Charcoal600
-import com.example.ui.theme.Charcoal700
-import com.example.ui.theme.Charcoal800
-import com.example.ui.theme.Charcoal900
-import com.example.ui.theme.NovaCyan
-import com.example.ui.theme.SafetyOrange
-import com.example.ui.theme.SafetyRed
-import com.example.ui.theme.SlateMuted
-import com.example.ui.theme.SuccessGreen
-import com.example.ui.theme.TitaniumSilver
-import kotlinx.coroutines.flow.firstOrNull
+import com.example.ui.theme.StoneLight
+import com.example.ui.theme.StoneMuted
+import com.example.ui.theme.WarmAccent
+import com.example.ui.theme.WarmAccentContainer
+import com.example.ui.theme.WarmAccentDark
+import com.example.ui.theme.WarmBorder
+import com.example.ui.theme.WarmCanvas
+import com.example.ui.theme.WarmError
+import com.example.ui.theme.WarmOffWhite
+import com.example.ui.theme.WarmSurface
+import com.example.ui.theme.WarmWarning
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -146,13 +142,13 @@ fun ChatScreen(
                     Column {
                         Text(
                             text = currentConversation?.title ?: "NOVA Chat",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface),
                             maxLines = 1
                         )
                         if (runningTask != null) {
                             Text(
-                                text = "Agent: ${runningTask.currentOperation}",
-                                style = MaterialTheme.typography.labelSmall.copy(color = NovaCyan),
+                                text = runningTask.currentOperation,
+                                style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.primary),
                                 maxLines = 1
                             )
                         }
@@ -163,7 +159,7 @@ fun ChatScreen(
                         onClick = { showConversationsSheet = true },
                         modifier = Modifier.testTag("chat_menu_button")
                     ) {
-                        Icon(Icons.Default.Menu, contentDescription = "Conversations", tint = NovaCyan)
+                        Icon(Icons.Default.Menu, contentDescription = "Conversations", tint = MaterialTheme.colorScheme.onSurface)
                     }
                 },
                 actions = {
@@ -176,7 +172,15 @@ fun ChatScreen(
                         },
                         modifier = Modifier.testTag("new_chat_button")
                     ) {
-                        Icon(Icons.Default.Add, contentDescription = "New Chat", tint = TitaniumSilver)
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Add, contentDescription = "New Chat", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                            }
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -185,6 +189,7 @@ fun ChatScreen(
                 )
             )
         },
+        containerColor = MaterialTheme.colorScheme.background,
         modifier = modifier.fillMaxSize()
     ) { paddingValues ->
         Column(
@@ -195,54 +200,57 @@ fun ChatScreen(
             // Task status card if running
             if (runningTask != null) {
                 Surface(
-                    color = Charcoal700,
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(16.dp),
+                    shadowElevation = 1.dp,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (runningTask.status == "WAITING_APPROVAL") WarmWarning else MaterialTheme.colorScheme.outline),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp)
-                        .border(1.dp, if (runningTask.status == "WAITING_APPROVAL") SafetyOrange else NovaCyan, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(10.dp),
+                            .padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (runningTask.status == "RUNNING" || runningTask.status == "PENDING") {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(18.dp),
                                 strokeWidth = 2.dp,
-                                color = NovaCyan
+                                color = MaterialTheme.colorScheme.primary
                             )
                         } else {
                             Icon(
                                 imageVector = Icons.Default.PlayArrow,
                                 contentDescription = "Status",
-                                tint = SafetyOrange,
+                                tint = WarmWarning,
                                 modifier = Modifier.size(20.dp)
                             )
                         }
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = if (runningTask.status == "WAITING_APPROVAL") "Waiting Approval: ${runningTask.pendingApprovalToolName}" else runningTask.currentOperation,
-                                style = MaterialTheme.typography.bodySmall.copy(color = TitaniumSilver),
+                                text = if (runningTask.status == "WAITING_APPROVAL") "Approval Required: ${runningTask.pendingApprovalToolName}" else runningTask.currentOperation,
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface),
                                 maxLines = 1
                             )
                         }
                         if (runningTask.status == "WAITING_APPROVAL") {
                             Button(
                                 onClick = { onNavigateToScreen(NovaScreen.TASKS) },
-                                colors = ButtonDefaults.buttonColors(containerColor = SafetyOrange),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                shape = RoundedCornerShape(20.dp),
                                 modifier = Modifier.height(32.dp).testTag("review_task_button")
                             ) {
-                                Text("Review", fontSize = 12.sp, color = Charcoal900)
+                                Text("Review", fontSize = 12.sp, color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.SemiBold)
                             }
                         } else {
                             IconButton(
                                 onClick = { repository.cancelTask(runningTask.id) },
                                 modifier = Modifier.size(32.dp).testTag("cancel_task_button")
                             ) {
-                                Icon(Icons.Default.Stop, contentDescription = "Cancel task", tint = SafetyRed)
+                                Icon(Icons.Default.Stop, contentDescription = "Cancel task", tint = WarmError)
                             }
                         }
                     }
@@ -255,15 +263,14 @@ fun ChatScreen(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                contentPadding = PaddingValues(vertical = 12.dp)
             ) {
                 items(messages, key = { it.id }) { msg ->
                     ChatMessageItem(
                         message = msg,
-                        onOpenAttachment = { relPath ->
-                            onNavigateToScreen(NovaScreen.FILES)
-                        }
+                        onOpenAttachment = { onNavigateToScreen(NovaScreen.FILES) }
                     )
                 }
 
@@ -273,21 +280,58 @@ fun ChatScreen(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 40.dp),
+                                .padding(vertical = 48.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    modifier = Modifier.size(56.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text("✨", fontSize = 26.sp)
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(14.dp))
                                 Text(
-                                    text = "Ready to assist",
-                                    style = MaterialTheme.typography.titleMedium.copy(color = NovaCyan, fontWeight = FontWeight.Bold)
+                                    text = "How can NOVA help today?",
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(
-                                    text = "Ask questions, automate the browser, edit files, or manage encrypted secrets.",
-                                    style = MaterialTheme.typography.bodySmall.copy(color = SlateMuted),
+                                    text = "Ask questions, browse the web, organize files, or inspect autonomous tasks.",
+                                    style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant),
                                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                                     modifier = Modifier.padding(horizontal = 24.dp)
                                 )
+
+                                Spacer(modifier = Modifier.height(20.dp))
+
+                                // Quick suggestion pills
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    listOf(
+                                        "Research latest tech news in the browser",
+                                        "Draft a project outline in Documents/",
+                                        "Check available models in Settings"
+                                    ).forEach { prompt ->
+                                        Surface(
+                                            shape = RoundedCornerShape(20.dp),
+                                            color = MaterialTheme.colorScheme.surface,
+                                            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                            modifier = Modifier.clickable { inputText = prompt }
+                                        ) {
+                                            Text(
+                                                text = prompt,
+                                                style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant),
+                                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -299,27 +343,27 @@ fun ChatScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     for (path in attachedFilePaths) {
                         Surface(
-                            color = Charcoal700,
+                            color = MaterialTheme.colorScheme.primaryContainer,
                             shape = RoundedCornerShape(16.dp),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Charcoal600)
+                            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Default.AttachFile, contentDescription = null, tint = NovaCyan, modifier = Modifier.size(14.dp))
+                                Icon(Icons.Default.AttachFile, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text(text = path.substringAfterLast('/'), style = MaterialTheme.typography.labelSmall.copy(color = TitaniumSilver))
-                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(text = path.substringAfterLast('/'), style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium))
+                                Spacer(modifier = Modifier.width(6.dp))
                                 Icon(
                                     Icons.Default.Close,
                                     contentDescription = "Remove",
-                                    tint = SlateMuted,
+                                    tint = StoneMuted,
                                     modifier = Modifier
                                         .size(14.dp)
                                         .clickable { attachedFilePaths = attachedFilePaths.filter { it != path } }
@@ -330,93 +374,104 @@ fun ChatScreen(
                 }
             }
 
-            // Input bar
-            Surface(
-                color = MaterialTheme.colorScheme.surface,
+            // Pill-shaped chat input bar
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(8.dp)
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+                Surface(
+                    shape = RoundedCornerShape(28.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    shadowElevation = 2.dp,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    IconButton(
-                        onClick = { showAttachFileDialog = true },
-                        modifier = Modifier.testTag("attach_file_button")
-                    ) {
-                        Icon(Icons.Default.AttachFile, contentDescription = "Attach File", tint = SlateMuted)
-                    }
-
-                    OutlinedTextField(
-                        value = inputText,
-                        onValueChange = { inputText = it },
-                        placeholder = { Text("Message NOVA agent or instruct a task...", fontSize = 14.sp, color = SlateMuted) },
+                    Row(
                         modifier = Modifier
-                            .weight(1f)
-                            .testTag("chat_input_field"),
-                        maxLines = 4,
-                        shape = RoundedCornerShape(20.dp),
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Charcoal800,
-                            unfocusedContainerColor = Charcoal800,
-                            focusedTextColor = TitaniumSilver,
-                            unfocusedTextColor = TitaniumSilver,
-                            focusedIndicatorColor = NovaCyan,
-                            unfocusedIndicatorColor = Charcoal600
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = { showAttachFileDialog = true },
+                            modifier = Modifier
+                                .size(40.dp)
+                                .testTag("attach_file_button")
+                        ) {
+                            Icon(Icons.Default.AttachFile, contentDescription = "Attach File", tint = StoneMuted, modifier = Modifier.size(20.dp))
+                        }
+
+                        OutlinedTextField(
+                            value = inputText,
+                            onValueChange = { inputText = it },
+                            placeholder = { Text("Ask NOVA or type a task...", fontSize = 14.sp, color = StoneLight) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("chat_input_field"),
+                            maxLines = 4,
+                            colors = TextFieldDefaults.colors(
+                                focusedContainerColor = Color.Transparent,
+                                unfocusedContainerColor = Color.Transparent,
+                                focusedIndicatorColor = Color.Transparent,
+                                unfocusedIndicatorColor = Color.Transparent,
+                                disabledIndicatorColor = Color.Transparent,
+                                focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                unfocusedTextColor = MaterialTheme.colorScheme.onSurface
+                            )
                         )
-                    )
 
-                    Spacer(modifier = Modifier.width(6.dp))
+                        val canSend = inputText.isNotBlank() && runningTask == null
+                        IconButton(
+                            onClick = {
+                                if (canSend) {
+                                    val text = inputText.trim()
+                                    val convId = activeConversationId ?: UUID.randomUUID().toString()
+                                    inputText = ""
+                                    val attached = attachedFilePaths
+                                    attachedFilePaths = emptyList()
 
-                    val canSend = inputText.isNotBlank() && runningTask == null
-                    IconButton(
-                        onClick = {
-                            if (canSend) {
-                                val text = inputText.trim()
-                                val convId = activeConversationId ?: UUID.randomUUID().toString()
-                                inputText = ""
-                                val attached = attachedFilePaths
-                                attachedFilePaths = emptyList()
-
-                                scope.launch {
-                                    // Save user message
-                                    repository.chatDao.insertMessage(
-                                        ChatMessageEntity(
-                                            id = UUID.randomUUID().toString(),
-                                            conversationId = convId,
-                                            sender = "user",
-                                            content = text,
-                                            attachedFilesJson = if (attached.isNotEmpty()) org.json.JSONArray(attached).toString() else null,
-                                            timestamp = System.currentTimeMillis()
+                                    scope.launch {
+                                        // Save user message
+                                        repository.chatDao.insertMessage(
+                                            ChatMessageEntity(
+                                                id = UUID.randomUUID().toString(),
+                                                conversationId = convId,
+                                                sender = "user",
+                                                content = text,
+                                                attachedFilesJson = if (attached.isNotEmpty()) org.json.JSONArray(attached).toString() else null,
+                                                timestamp = System.currentTimeMillis()
+                                            )
                                         )
-                                    )
 
-                                    // Launch agent task
-                                    val promptWithContext = if (attached.isNotEmpty()) {
-                                        "$text\n\n[Attached workspace files: ${attached.joinToString(", ")}]"
-                                    } else {
-                                        text
+                                        // Launch agent task
+                                        val promptWithContext = if (attached.isNotEmpty()) {
+                                            "$text\n\n[Attached workspace files: ${attached.joinToString(", ")}]"
+                                        } else {
+                                            text
+                                        }
+                                        repository.launchTask(
+                                            prompt = promptWithContext,
+                                            title = text.take(30),
+                                            conversationId = convId
+                                        )
                                     }
-                                    repository.launchTask(
-                                        prompt = promptWithContext,
-                                        title = text.take(30),
-                                        conversationId = convId
-                                    )
                                 }
-                            }
-                        },
-                        enabled = canSend,
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(if (canSend) NovaCyan else Charcoal700)
-                            .testTag("send_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Send,
-                            contentDescription = "Send",
-                            tint = if (canSend) Charcoal900 else SlateMuted
-                        )
+                            },
+                            enabled = canSend,
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                .testTag("send_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = "Send",
+                                tint = if (canSend) MaterialTheme.colorScheme.onPrimary else StoneLight,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -429,12 +484,12 @@ fun ChatScreen(
         ModalBottomSheet(
             onDismissRequest = { showConversationsSheet = false },
             sheetState = sheetState,
-            containerColor = Charcoal800
+            containerColor = MaterialTheme.colorScheme.surface
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .padding(horizontal = 20.dp, vertical = 8.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -442,7 +497,7 @@ fun ChatScreen(
                 ) {
                     Text(
                         text = "Conversations",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = NovaCyan)
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                     )
                     Spacer(modifier = Modifier.weight(1f))
                     IconButton(
@@ -455,25 +510,25 @@ fun ChatScreen(
                         },
                         modifier = Modifier.testTag("drawer_new_chat_button")
                     ) {
-                        Icon(Icons.Default.Add, contentDescription = "New Conversation", tint = TitaniumSilver)
+                        Icon(Icons.Default.Add, contentDescription = "New Conversation", tint = MaterialTheme.colorScheme.primary)
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(300.dp)
+                        .height(300.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     items(conversations, key = { it.id }) { conv ->
                         val isSelected = conv.id == activeConversationId
                         Surface(
-                            color = if (isSelected) Charcoal700 else Color.Transparent,
-                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(12.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 2.dp)
                                 .clickable {
                                     activeConversationId = conv.id
                                     showConversationsSheet = false
@@ -482,14 +537,14 @@ fun ChatScreen(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
                                     text = conv.title,
                                     style = MaterialTheme.typography.bodyMedium.copy(
-                                        color = if (isSelected) NovaCyan else TitaniumSilver,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
                                     ),
                                     modifier = Modifier.weight(1f)
                                 )
@@ -500,7 +555,7 @@ fun ChatScreen(
                                     },
                                     modifier = Modifier.size(28.dp)
                                 ) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Rename", tint = SlateMuted, modifier = Modifier.size(16.dp))
+                                    Icon(Icons.Default.Edit, contentDescription = "Rename", tint = StoneMuted, modifier = Modifier.size(16.dp))
                                 }
                                 IconButton(
                                     onClick = {
@@ -514,7 +569,7 @@ fun ChatScreen(
                                     },
                                     modifier = Modifier.size(28.dp)
                                 ) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = SlateMuted, modifier = Modifier.size(16.dp))
+                                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = WarmError, modifier = Modifier.size(16.dp))
                                 }
                             }
                         }
@@ -526,7 +581,13 @@ fun ChatScreen(
 
     // Attach File Dialog
     if (showAttachFileDialog) {
-        val workspaceFiles = remember { repository.workspaceManager.listFiles("") }
+        val workspaceFiles = remember {
+            try {
+                repository.workspaceManager.listFiles("")
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }
         AlertDialog(
             onDismissRequest = { showAttachFileDialog = false },
             title = { Text("Attach Workspace File") },
@@ -545,7 +606,7 @@ fun ChatScreen(
                                 .padding(vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.Folder, contentDescription = null, tint = NovaCyan, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(text = file.relativePath, style = MaterialTheme.typography.bodyMedium)
                         }
@@ -601,24 +662,33 @@ fun ChatMessageItem(
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
         Card(
-            shape = RoundedCornerShape(12.dp),
+            shape = if (isUser) {
+                RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 4.dp)
+            } else {
+                RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomEnd = 20.dp, bottomStart = 4.dp)
+            },
             colors = CardDefaults.cardColors(
-                containerColor = if (isUser) Charcoal700 else Charcoal800
+                containerColor = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
             ),
             modifier = Modifier
                 .widthIn(max = 320.dp)
                 .border(
                     width = 1.dp,
-                    color = if (isUser) Charcoal600 else Charcoal700,
-                    shape = RoundedCornerShape(12.dp)
-                )
+                    color = if (isUser) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f) else MaterialTheme.colorScheme.outline,
+                    shape = if (isUser) {
+                        RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 4.dp)
+                    } else {
+                        RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomEnd = 20.dp, bottomStart = 4.dp)
+                    }
+                ),
+            elevation = CardDefaults.cardElevation(defaultElevation = if (isUser) 0.dp else 1.dp)
         ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                // Header (sender)
+            Column(modifier = Modifier.padding(14.dp)) {
+                // Header (sender indicator)
                 Text(
-                    text = if (isUser) "You" else "NOVA Agent",
+                    text = if (isUser) "You" else "NOVA",
                     style = MaterialTheme.typography.labelSmall.copy(
-                        color = if (isUser) NovaCyan else SlateMuted,
+                        color = if (isUser) MaterialTheme.colorScheme.primary else StoneMuted,
                         fontWeight = FontWeight.Bold
                     ),
                     modifier = Modifier.padding(bottom = 4.dp)
@@ -629,10 +699,10 @@ fun ChatMessageItem(
 
                 // Attached files if any
                 if (!message.attachedFilesJson.isNullOrBlank()) {
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = "Attached: ${message.attachedFilesJson}",
-                        style = MaterialTheme.typography.labelSmall.copy(color = SlateMuted)
+                        style = MaterialTheme.typography.labelSmall.copy(color = StoneMuted)
                     )
                 }
             }
