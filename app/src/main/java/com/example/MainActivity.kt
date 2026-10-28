@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.example.nova.data.NovaRepository
+import com.example.nova.notifications.TaskNotificationHelper
 import com.example.nova.ui.NovaApp
 import com.example.ui.theme.NovaWorkspaceTheme
 
@@ -18,6 +19,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Task-state notifications: create the channel and run the
+        // Android 13+ POST_NOTIFICATIONS permission flow.
+        TaskNotificationHelper.ensureChannel(applicationContext)
+        TaskNotificationHelper.requestPermissionIfNeeded(this)
 
         repository = NovaRepository(applicationContext)
 

@@ -43,7 +43,7 @@ data class AgentTaskEntity(
     @PrimaryKey val id: String = UUID.randomUUID().toString(),
     val title: String,
     val prompt: String,
-    val status: String = "PENDING", // PENDING, RUNNING, PAUSED, WAITING_APPROVAL, COMPLETED, FAILED, CANCELLED
+    val status: String = "PENDING", // PENDING, RUNNING, PAUSED, WAITING_APPROVAL, COMPLETED, FAILED, CANCELLED, SAFETY_STOPPED
     val currentOperation: String = "Initializing",
     val progressPercent: Int = -1, // -1 means indeterminate
     val errorMessage: String? = null,
@@ -58,7 +58,8 @@ data class AgentTaskEntity(
     val cadence: String = "RUN_ONCE", // RUN_ONCE, DAILY, WEEKLY, MONTHLY
     val nextRunTime: Long? = null,
     val citationsJson: String? = null, // JSON array of [{title, url}]
-    val createdFilesJson: String? = null
+    val createdFilesJson: String? = null,
+    val screenshotsJson: String? = null // JSON array of workspace-relative screenshot paths captured during the run
 )
 
 @Entity(tableName = "task_runs")

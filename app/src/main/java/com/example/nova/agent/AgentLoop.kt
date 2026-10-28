@@ -51,6 +51,12 @@ class AgentLoop(
     // Map of active running jobs per taskId
     private val activeJobs = ConcurrentHashMap<String, Job>()
 
+    companion object {
+        /** Bounds for stored browser-screenshot evidence per task. */
+        const val MAX_TASK_SCREENSHOTS = 12
+        const val MAX_SCREENSHOT_BYTES = 5L * 1024 * 1024
+    }
+
     fun registerJob(taskId: String, job: Job) {
         activeJobs[taskId] = job
     }
@@ -83,6 +89,7 @@ class AgentLoop(
         var lastToolCallSignature = ""
         val visitedCitations = mutableListOf<JSONObject>()
         val createdFilePaths = mutableListOf<String>()
+        val screenshotPaths = mutableListOf<String>()
         val stepsRecord = mutableListOf<String>()
         val logBuffer = StringBuilder()
 
@@ -169,6 +176,42 @@ class AgentLoop(
                     } else {
                         duplicateCount = 0
                         lastToolCallSignature = signature
+                    }
+
+                    // 0. Unrecognized-action guardrail: a tool call naming a
+                    // tool that does not exist is never executed and never
+                    // offered for approval — the task halts in the distinct
+                    // SAFETY_STOPPED terminal state ("Stopped — safety could
+                    // not be confirmed"). The block is recorded in the
+                    // approvals history with the standard warning text.
+                    if (toolRegistry.getTool(toolCall.name) == null) {
+                        val redactedArgs = SecretRedactor.redactSecrets(toolCall.argumentsJson)
+                        val warningText = "This action wasn't recognized. Approve it only if you expected it.\nTool: ${toolCall.name}\nArguments: $redactedArgs"
+                        try {
+                            approvalDao?.insertApproval(
+                                ApprovalRecordEntity(
+                                    id = UUID.randomUUID().toString(),
+                                    actionName = toolCall.name,
+                                    toolName = toolCall.name,
+                                    argumentsSummary = warningText,
+                                    status = "DENIED",
+                                    createdAt = System.currentTimeMillis(),
+                                    decidedAt = System.currentTimeMillis(),
+                                    taskId = taskId
+                                )
+                            )
+                        } catch (ignored: Exception) {}
+                        recordStep(taskId, stepNumber++, toolCall.name, toolCall.argumentsJson, "Blocked: unrecognized action was not executed", "BLOCKED")
+                        currentTask = currentTask.copy(
+                            status = "SAFETY_STOPPED",
+                            currentOperation = "Stopped — safety could not be confirmed. Unrecognized action '${toolCall.name}' was blocked and was not executed.",
+                            errorMessage = "Unrecognized action blocked by the safety guardrail",
+                            completedAt = System.currentTimeMillis(),
+                            updatedAt = System.currentTimeMillis()
+                        )
+                        taskDao.updateTask(currentTask)
+                        onPresenceChange(PipelinePresence.READY)
+                        return@withContext
                     }
 
                     // 1. Validation
@@ -283,6 +326,22 @@ class AgentLoop(
                         }
                     }
 
+                    // Collect browser screenshot evidence (real captures only,
+                    // from the take_screenshot tool's output files). Bounded:
+                    // at most MAX_TASK_SCREENSHOTS paths, each file <= 5 MB.
+                    if (toolCall.name == "take_screenshot" && result.success) {
+                        for (path in result.outputFiles) {
+                            if (screenshotPaths.size >= MAX_TASK_SCREENSHOTS) break
+                            if (path in screenshotPaths) continue
+                            val sizeOk = try {
+                                workspaceManager.getFileMetadata(path).sizeBytes <= MAX_SCREENSHOT_BYTES
+                            } catch (ignored: Exception) {
+                                false
+                            }
+                            if (sizeOk) screenshotPaths.add(path)
+                        }
+                    }
+
                     recordStep(
                         taskId = taskId,
                         stepNumber = stepNumber++,
@@ -340,10 +399,11 @@ class AgentLoop(
             if (isQuotaError) {
                 onPresenceChange(PipelinePresence.PROVIDER_LIMIT_REACHED)
             }
+            val safeMessage = com.example.nova.ai.ProviderErrors.userMessage(e)
             currentTask = currentTask.copy(
                 status = "FAILED",
-                currentOperation = "Task failed: ${e.message}",
-                errorMessage = e.message,
+                currentOperation = "Task failed: $safeMessage",
+                errorMessage = safeMessage,
                 updatedAt = System.currentTimeMillis()
             )
             taskDao.updateTask(currentTask)
@@ -360,9 +420,14 @@ class AgentLoop(
                     org.json.JSONArray(createdFilePaths).toString()
                 } else null
 
+                val screenshotsJsonStr = if (screenshotPaths.isNotEmpty()) {
+                    org.json.JSONArray(screenshotPaths).toString()
+                } else null
+
                 currentTask = currentTask.copy(
                     citationsJson = citJsonStr,
                     createdFilesJson = filesJsonStr,
+                    screenshotsJson = screenshotsJsonStr,
                     updatedAt = System.currentTimeMillis()
                 )
                 taskDao.updateTask(currentTask)

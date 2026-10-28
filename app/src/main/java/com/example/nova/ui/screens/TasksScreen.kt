@@ -63,6 +63,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.layout.ContentScale
+import coil.compose.AsyncImage
 import com.example.nova.data.AgentTaskEntity
 import com.example.nova.data.ApprovalRecordEntity
 import com.example.nova.data.NovaRepository
@@ -95,7 +97,7 @@ fun TasksScreen(
 ) {
     val tasks by repository.tasks.collectAsState(initial = emptyList())
     var selectedFilterIndex by remember { mutableIntStateOf(0) }
-    val filterTabs = listOf("All", "Active", "Needs Approval", "Upcoming", "Completed")
+    val filterTabs = listOf("All", "Active", "Needs Approval", "Scheduled", "Completed")
 
     val filteredTasks = remember(tasks, selectedFilterIndex) {
         when (selectedFilterIndex) {
@@ -103,7 +105,7 @@ fun TasksScreen(
             2 -> tasks.filter { it.status == "WAITING_APPROVAL" }
             3 -> tasks.filter { (it.cadence != "RUN_ONCE" || it.nextRunTime != null) && it.status != "CANCELLED" }
                 .sortedBy { it.nextRunTime ?: Long.MAX_VALUE }
-            4 -> tasks.filter { it.status == "COMPLETED" || it.status == "FAILED" || it.status == "CANCELLED" }
+            4 -> tasks.filter { it.status == "COMPLETED" || it.status == "FAILED" || it.status == "CANCELLED" || it.status == "SAFETY_STOPPED" }
             else -> tasks
         }
     }
@@ -227,6 +229,27 @@ fun TaskCardItem(
     val runHistory by repository.taskRunDao.getRunsForTask(task.id).collectAsState(initial = emptyList())
 
     var isExpanded by remember { mutableStateOf(false) }
+    var showScreenshots by remember { mutableStateOf(false) }
+
+    // Parse stored browser screenshot evidence paths if present (real
+    // captures recorded by the agent loop; absent when none were taken)
+    val screenshotList = remember(task.screenshotsJson) {
+        if (!task.screenshotsJson.isNullOrBlank()) {
+            try {
+                val array = org.json.JSONArray(task.screenshotsJson)
+                val result = mutableListOf<String>()
+                for (i in 0 until array.length()) {
+                    val p = array.optString(i)
+                    if (p.isNotBlank()) result.add(p)
+                }
+                result
+            } catch (e: Exception) {
+                emptyList()
+            }
+        } else {
+            emptyList()
+        }
+    }
 
     // Parse citations if present
     val citationsList = remember(task.citationsJson) {
@@ -298,7 +321,7 @@ fun TaskCardItem(
         }
 
         // 4. Completion or Failure
-        if (task.status == "COMPLETED" || task.status == "FAILED" || task.status == "CANCELLED") {
+        if (task.status == "COMPLETED" || task.status == "FAILED" || task.status == "CANCELLED" || task.status == "SAFETY_STOPPED") {
             list.add(
                 AuditTimelineEvent(
                     timestamp = task.completedAt ?: task.updatedAt,
@@ -338,13 +361,19 @@ fun TaskCardItem(
                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface),
                         maxLines = 1
                     )
-                    if (task.cadence != "RUN_ONCE") {
+                    if (task.cadence != "RUN_ONCE" || task.nextRunTime != null) {
                         val sdf = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
                         val nextRunStr = if (task.nextRunTime != null) sdf.format(Date(task.nextRunTime)) else "Pending"
                         Text(
-                            text = "Cadence: ${task.cadence} • Next: $nextRunStr",
+                            text = "Schedule: ${task.cadence} • Next: $nextRunStr",
                             style = MaterialTheme.typography.labelSmall.copy(color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold),
                             fontSize = 11.sp
+                        )
+                        Text(
+                            text = "Prompt: ${task.prompt}",
+                            style = MaterialTheme.typography.labelSmall.copy(color = StoneMuted),
+                            fontSize = 11.sp,
+                            maxLines = 2
                         )
                     }
                 }
@@ -505,7 +534,7 @@ fun TaskCardItem(
                     ) {
                         Icon(Icons.Default.Stop, contentDescription = "Cancel", tint = WarmError)
                     }
-                } else if (task.status == "FAILED" || task.status == "CANCELLED") {
+                } else if (task.status == "FAILED" || task.status == "CANCELLED" || task.status == "SAFETY_STOPPED") {
                     IconButton(
                         onClick = { repository.retryTask(task.id) },
                         modifier = Modifier.size(32.dp).testTag("retry_task_button_${task.id}")
@@ -542,6 +571,53 @@ fun TaskCardItem(
                                 ) {
                                     Text("Run at ${sdf.format(Date(run.runTime))}", fontSize = 11.sp, fontWeight = FontWeight.Medium)
                                     Text(run.status, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (run.status == "SUCCESS" || run.status == "COMPLETED") WarmSuccess else WarmError)
+                                }
+                            }
+                        }
+                    }
+
+                    if (screenshotList.isNotEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            modifier = Modifier.clickable { showScreenshots = !showScreenshots }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Browser screenshots (${screenshotList.size})",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = StoneMuted, fontWeight = FontWeight.Medium)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = if (showScreenshots) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = "Toggle screenshots",
+                                    tint = StoneMuted,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+
+                        AnimatedVisibility(visible = showScreenshots) {
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                screenshotList.forEachIndexed { index, path ->
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(
+                                            text = "Browser screenshot ${index + 1} of ${screenshotList.size}",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, color = StoneMuted)
+                                        )
+                                        AsyncImage(
+                                            model = java.io.File(repository.workspaceManager.rootDir, path),
+                                            contentDescription = "Browser screenshot ${index + 1} of ${screenshotList.size}",
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(220.dp)
+                                                .clip(RoundedCornerShape(8.dp)),
+                                            contentScale = ContentScale.Fit
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -614,6 +690,7 @@ fun TaskStatusBadge(status: String) {
         "WAITING_APPROVAL" -> Triple(WarmWarning.copy(alpha = 0.15f), WarmWarning, "NEEDS YOU")
         "COMPLETED" -> Triple(WarmSuccess.copy(alpha = 0.15f), WarmSuccess, "COMPLETED")
         "FAILED" -> Triple(WarmError.copy(alpha = 0.15f), WarmError, "FAILED")
+        "SAFETY_STOPPED" -> Triple(WarmError.copy(alpha = 0.15f), WarmError, "Stopped — safety could not be confirmed")
         else -> Triple(StoneLight.copy(alpha = 0.2f), StoneMuted, status)
     }
 

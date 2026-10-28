@@ -11,7 +11,9 @@ import com.example.nova.ai.AIMessage
 import com.example.nova.ai.AIProviderAdapter
 import com.example.nova.ai.AIProviderFactory
 import com.example.nova.ai.FakeAIProvider
+import com.example.nova.ai.ProviderErrors
 import com.example.nova.browser.BrowserController
+import com.example.nova.notifications.TaskNotificationHelper
 import com.example.nova.security.PermissionManager
 import com.example.nova.security.VaultManager
 import com.example.nova.workspace.WorkspaceManager
@@ -96,6 +98,26 @@ class NovaRepository(
                     executeDueScheduledTasks()
                 } catch (ignored: Exception) {}
                 delay(30_000)
+            }
+        }
+        // Post a notification when a task transitions into a terminal or
+        // needs-you state. The first emission only seeds the baseline so
+        // existing tasks don't notify on app start.
+        scope.launch {
+            var previousStatuses: Map<String, String>? = null
+            tasks.collect { taskList ->
+                val current = taskList.associate { it.id to it.status }
+                val previous = previousStatuses
+                if (previous != null) {
+                    for (task in taskList) {
+                        if (previous[task.id] != task.status && task.status in TaskNotificationHelper.NOTIFY_STATUSES) {
+                            try {
+                                TaskNotificationHelper.notifyTaskTransition(context, task)
+                            } catch (ignored: Exception) {}
+                        }
+                    }
+                }
+                previousStatuses = current
             }
         }
     }
@@ -249,15 +271,30 @@ class NovaRepository(
         scope.launch {
             val unavailable = providerUnavailableReason()
             if (unavailable != null) {
-                chatDao.insertMessage(
-                    ChatMessageEntity(
-                        id = UUID.randomUUID().toString(),
-                        conversationId = conversationId,
-                        sender = "assistant",
-                        content = "⚠️ **System notice — not an AI reply.** $unavailable Add your Base URL and API key in **Settings → AI Engine**, then try again.",
-                        timestamp = System.currentTimeMillis()
+                // The notice is inserted AT MOST ONCE per user message: if a
+                // notice already follows the latest user message (duplicate
+                // invocation, double-tap, or a second repository instance),
+                // don't stack another identical one.
+                val recent = try {
+                    chatDao.getRecentMessages(conversationId, 10)
+                } catch (ignored: Exception) {
+                    emptyList()
+                }
+                val lastUserIndex = recent.indexOfFirst { it.sender == "user" }
+                val alreadyNoticed = recent
+                    .take(if (lastUserIndex == -1) recent.size else lastUserIndex)
+                    .any { it.sender == "assistant" && it.content.startsWith(SYSTEM_NOTICE_PREFIX) }
+                if (!alreadyNoticed) {
+                    chatDao.insertMessage(
+                        ChatMessageEntity(
+                            id = UUID.randomUUID().toString(),
+                            conversationId = conversationId,
+                            sender = "assistant",
+                            content = "$SYSTEM_NOTICE_PREFIX $unavailable Add your Base URL and API key in **Settings → AI Engine**, then try again.",
+                            timestamp = System.currentTimeMillis()
+                        )
                     )
-                )
+                }
                 return@launch
             }
 
@@ -295,7 +332,7 @@ class NovaRepository(
                             id = UUID.randomUUID().toString(),
                             conversationId = conversationId,
                             sender = "assistant",
-                            content = "Error answering request: ${e.message}",
+                            content = "Error answering request: ${ProviderErrors.userMessage(e)}",
                             timestamp = System.currentTimeMillis()
                         )
                     )
@@ -307,6 +344,9 @@ class NovaRepository(
     }
 
     companion object {
+        /** Prefix of the honest "no real provider" system notice in chat. */
+        const val SYSTEM_NOTICE_PREFIX = "⚠️ **System notice — not an AI reply.**"
+
         @Volatile
         private var INSTANCE: NovaRepository? = null
 
