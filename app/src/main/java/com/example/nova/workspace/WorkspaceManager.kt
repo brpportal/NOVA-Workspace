@@ -87,7 +87,6 @@ inside the app's private storage.
 - A hidden marker file `.environment-installed` records that the
   Environment pack has been installed.
 """
-    }
 
         fun createDefault(context: Context): WorkspaceManager {
             val base = File(context.filesDir, "workspace")
