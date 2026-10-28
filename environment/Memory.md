@@ -1,6 +1,6 @@
 # Personal AI Memory
 
-*Persistent facts, user preferences, and important context for the NOVA agent.
+*Persistent facts, user preferences, and important context for the Spark agent.
 Edit this file freely — the agent reads it before every task and never
 overwrites your edits.*
 
@@ -22,5 +22,5 @@ overwrites your edits.*
 
 ## Key Project Notes
 
-- NOVA Workspace uses Android Keystore encryption for all credentials.
+- Spark uses Android Keystore encryption for all credentials.
 - Vision models are preferred for browser navigation tasks.

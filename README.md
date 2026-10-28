@@ -1,6 +1,6 @@
-# NOVA Workspace
+# Spark (formerly NOVA Workspace)
 
-NOVA Workspace is a production-oriented, standalone native Android AI application built with Kotlin and Jetpack Compose (Material 3). It unifies an autonomous personal AI agent, an embedded WebKit browser, an encrypted Secret Vault, a sandboxed local file manager, and granular permission enforcement.
+Spark (formerly NOVA Workspace) is a production-oriented, standalone native Android AI application built with Kotlin and Jetpack Compose (Material 3). It unifies an autonomous personal AI agent, an embedded WebKit browser, an encrypted Secret Vault, a sandboxed local file manager, and granular permission enforcement.
 
 ---
 
@@ -16,13 +16,18 @@ NOVA Workspace is a production-oriented, standalone native Android AI applicatio
 
 > **Note:** This download currently serves the verified **Milestone 1** APK (Release
 > [v0.1.0-m1](https://github.com/brpportal/NOVA-Workspace/releases/tag/v0.1.0-m1)).
-> The `main` branch now contains the **Google AI Studio v2 update** described below
-> (File Manager crash fixes, UI redesign, custom AI provider profiles with
-> Fetch Models, on-device agent browser) plus the **2026-10-28 fix round**
-> (chat-vs-task routing, Fetch Models empty-list handling, always-visible
-> browser control buttons, workspace seeding + Environment pack), verified by
-> CI on every push. Earlier code remains in this repo's git history, and the
-> Milestone 1 release is untouched.
+> The `main` branch now contains the **Spark upgrade** (the app was renamed
+> from NOVA Workspace to **Spark** in the Google AI Studio upgrade of
+> 2026-10-28): presence states in chat, approval records with timeout and an
+> Approvals history screen, Muse-style browser control wording
+> ("Take control" / "You're in control" / "Hand back to the agent") with a
+> "Needs you" task state, Add memory / Summarize into memory, and a task
+> audit timeline — merged on top of the AI Studio v2 update and the
+> 2026-10-28 fix round (chat-vs-task routing, Fetch Models empty-list
+> handling, workspace seeding + Environment pack), whose behaviours were
+> re-verified piece by piece against the new code before shipping. Earlier
+> code remains in this repo's git history, and the Milestone 1 release is
+> untouched.
 >
 > All releases: [github.com/brpportal/NOVA-Workspace/releases](https://github.com/brpportal/NOVA-Workspace/releases)
 
@@ -44,27 +49,26 @@ heuristics:
 - Everything else (greetings, thanks, discussion) → **plain chat**.
 
 Plain chat never creates a task record. Agent step narration stays in the
-Tasks tab; chat shows a single "Working on it" line plus the task's final
-answer. If no real AI provider is configured, chat and task launch show an
+Tasks tab. If no real AI provider is configured, chat and task launch show an
 honest system notice with the real reason — simulated/canned replies are
 never presented as if a model answered.
 
 ## Environment pack
 
-The repo's `environment/` folder — mirrored into the app at
-`app/src/main/assets/environment/` — holds the agent's environment files:
-`AGENT.md` (core behavior rules), `BROWSER.md` (browser playbook),
-`SAFETY.md` (permission & approval rules), `TASK_TEMPLATE.md`, and the
-`Memory.md` / `Training.md` starter templates (7,939 bytes total).
+The app bundles its agent environment files and installs them into the
+workspace from the **Files** tab: the **Install Environment** card shows the
+pack's exact size (computed from the bundled contents) and writes `AGENT.md`
+(core behavior rules), `BROWSER.md` (browser playbook), `SAFETY.md`
+(permission & approval rules) and `TASK_TEMPLATE.md` into the workspace root,
+plus the `Memory.md` / `Training.md` starters into `Memory/`. Installing
+**never overwrites an existing file** — edited files are always kept — and a
+`.environment-installed` marker records the install (the card then offers
+"Reinstall Environment"). It is a purely local copy and works offline.
 
-In the app's **Files** tab, **Install Environment • 0.008 MB** copies the pack
-into the workspace: the full pack lands in `Environment/`, and the Memory /
-Training templates refresh `Memory/Memory.md` / `Memory/Training.md` **only**
-when untouched — an edited file is kept, and the fresh template is saved next
-to it as `<name>.template.md`. A `.environment-installed` marker records the
-install. It is a purely local asset copy and works offline. The workspace
-itself is seeded on first launch with the standard folders, a root
-`README.md` explaining the layout, the Memory/Training starters, and
+A human-readable reference copy of the environment pack is kept in the
+repo's `environment/` folder, mirrored at `app/src/main/assets/environment/`.
+The workspace itself is seeded on first launch with the standard folders, a
+root `README.md` explaining the layout, the Memory/Training starters, and
 `AI-Tasks/index.md` — seeding is idempotent and never overwrites edits.
 
 ## Provider notes (Fetch Models & Test Connection)
@@ -74,10 +78,11 @@ itself is seeded on first launch with the standard folders, a root
   providers/plans (e.g. an exhausted free plan) return `{"data": []}` — and
   you can always type a model name manually in the Active Model field.
   Non-200 responses show the real HTTP status code.
-- **Test Connection** performs the same lightweight `/models` call and
-  reports the real outcome (HTTP status, latency, model count). A manually
-  typed model name that does not exist on your plan will still fail in chat —
-  with the provider's real error shown, never a fake success.
+- **Test Connection** sends a minimal chat request (`ping`) with the
+  configured model and reports the real outcome — success with latency, or
+  the real HTTP status and error body. A manually typed model name that does
+  not exist on your plan fails here and in chat with the provider's real
+  error, never a fake success.
 
 ---
 

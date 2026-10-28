@@ -1,6 +1,6 @@
 # Safety & Permission Rules
 
-NOVA's permission system decides what the agent may do on its own, what needs the
+Spark's permission system decides what the agent may do on its own, what needs the
 user's approval, and what is always blocked.
 
 ## Permission Modes (Secret Vault)
