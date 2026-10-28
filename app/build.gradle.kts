@@ -6,12 +6,12 @@ plugins {
 
 android {
     namespace = "com.novaworkspace.app"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.novaworkspace.app"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 1
         versionName = "0.1.0-m1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

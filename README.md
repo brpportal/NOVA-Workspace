@@ -65,7 +65,7 @@ introduced in their own milestones (M2/M3/M5) rather than as empty shells.
 | Android Gradle Plugin | 8.7.3 | Stable 8.7 line, JDK 17, well-tested with Kotlin 2.0 |
 | Kotlin | 2.0.21 | Stable 2.0 line; Compose compiler is now the `kotlin-compose` Gradle plugin |
 | Jetpack Compose BOM | 2024.10.01 | Stable BOM matching the Kotlin 2.0 / AGP 8.7 era |
-| compileSdk / targetSdk | 34 | Stable, widely supported target for this toolchain |
+| compileSdk / targetSdk | 35 | Stable, widely supported target for this toolchain |
 | minSdk | 24 | Broad device coverage including smaller / older phones |
 | Navigation Compose | 2.8.4 | Stable 2.8 line |
 | Lifecycle | 2.8.7 | Stable 2.8 line |
@@ -86,14 +86,14 @@ runs `testDebugUnitTest`, then `assembleDebug`, and uploads
 
 ### Option B — Android Studio (phone-only developers: use a free cloud
 ### workspace or any PC when available; Android Studio cannot run on Android)
-1. Install Android Studio (JDK 17 is bundled) and SDK Platform 34.
+1. Install Android Studio (JDK 17 is bundled) and SDK Platform 35.
 2. Open this folder, let Gradle sync (it downloads Gradle 8.9 via the wrapper).
 3. Run: `./gradlew testDebugUnitTest assembleDebug`
 4. APK: `app/build/outputs/apk/debug/app-debug.apk` — install on the device
    with `adb install app-debug.apk` or by transferring the file to the phone.
 
 ### Option C — Command line only
-Requires JDK 17 + Android SDK Platform 34 (`ANDROID_HOME` set), then
+Requires JDK 17 + Android SDK Platform 35 (`ANDROID_HOME` set), then
 `./gradlew assembleDebug`.
 
 Note: the development VM that produced M1 has no Java/Gradle/Android SDK,
