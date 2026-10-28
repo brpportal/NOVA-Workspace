@@ -5,6 +5,19 @@ Kotlin + Jetpack Compose, embedded browser, local file manager, persistent
 memory, encrypted Secret Vault, and granular permission management.
 Full specification: [docs/SPEC.md](docs/SPEC.md)
 
+## 📥 Download & Install
+
+[![Download APK](https://img.shields.io/badge/Download-APK%20(Milestone%201)-brightgreen?style=for-the-badge&logo=android)](https://github.com/brpportal/NOVA-Workspace/releases/latest/download/NOVA-Workspace-debug.apk)
+
+**[⬇️ Download the latest APK](https://github.com/brpportal/NOVA-Workspace/releases/latest/download/NOVA-Workspace-debug.apk)**
+
+1. Tap the button above on your Android phone — no login needed.
+2. Open the downloaded `NOVA-Workspace-debug.apk` file.
+3. Allow "install from this source" when Android asks, then install.
+
+This is a **debug build** of Milestone 1 (app shell + 5 screens) for testing.
+All releases: [github.com/brpportal/NOVA-Workspace/releases](https://github.com/brpportal/NOVA-Workspace/releases)
+
 - **Package name:** `com.novaworkspace.app`
 - **Budget:** $0 initially — free tools only, user-provided AI API keys.
 - **Privacy:** local-first, persistent, private workspace. No custom cloud
