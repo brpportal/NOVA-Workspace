@@ -15,7 +15,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.activity.compose.BackHandler
 import com.example.nova.data.NovaRepository
-import com.example.nova.ui.components.NovaBottomBar
 import com.example.nova.ui.components.NovaScreen
 import com.example.nova.ui.screens.BrowserScreen
 import com.example.nova.ui.screens.ChatScreen
@@ -37,11 +36,21 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
@@ -66,6 +75,10 @@ fun NovaApp(
     var currentScreen by remember { mutableStateOf(NovaScreen.CHAT) }
     var isCommandPaletteOpen by remember { mutableStateOf(false) }
     var showApprovalsScreen by remember { mutableStateOf(false) }
+    // Navigation restructure: no bottom bar — the header carries icon-only
+    // Chat/Browser buttons and every other destination lives in this drawer.
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val appScope = rememberCoroutineScope()
 
     if (showApprovalsScreen) {
         BackHandler {
@@ -87,13 +100,53 @@ fun NovaApp(
             onBack = { showApprovalsScreen = false }
         )
     } else {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            drawerContent = {
+                ModalDrawerSheet {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Spark",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black),
+                        modifier = Modifier.padding(horizontal = 28.dp, vertical = 8.dp)
+                    )
+                    NovaScreen.entries.forEach { screen ->
+                        NavigationDrawerItem(
+                            label = { Text(screen.title) },
+                            icon = {
+                                Icon(
+                                    imageVector = if (screen == currentScreen) screen.selectedIcon else screen.unselectedIcon,
+                                    contentDescription = screen.title
+                                )
+                            },
+                            selected = screen == currentScreen,
+                            onClick = {
+                                currentScreen = screen
+                                appScope.launch { drawerState.close() }
+                            },
+                            modifier = Modifier
+                                .padding(NavigationDrawerItemDefaults.ItemPadding)
+                                .testTag("drawer_${screen.tag}")
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    NavigationDrawerItem(
+                        label = { Text("Approvals") },
+                        icon = { Icon(imageVector = Icons.Default.Shield, contentDescription = "Approvals") },
+                        selected = false,
+                        onClick = {
+                            showApprovalsScreen = true
+                            appScope.launch { drawerState.close() }
+                        },
+                        modifier = Modifier
+                            .padding(NavigationDrawerItemDefaults.ItemPadding)
+                            .testTag("drawer_approvals")
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+            }
+        ) {
         Scaffold(
-            bottomBar = {
-                NovaBottomBar(
-                    currentScreen = currentScreen,
-                    onScreenSelected = { currentScreen = it }
-                )
-            },
             modifier = modifier.fillMaxSize()
         ) { paddingValues ->
             Column(
@@ -117,6 +170,20 @@ fun NovaApp(
                             .padding(horizontal = 16.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = { appScope.launch { drawerState.open() } },
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .testTag("open_nav_drawer")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Menu,
+                                    contentDescription = "Open navigation menu",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
                             Surface(
                                 shape = CircleShape,
                                 color = MaterialTheme.colorScheme.primary,
@@ -134,6 +201,34 @@ fun NovaApp(
                         }
 
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            // Primary navigation: icon-only Chat / Browser buttons
+                            IconButton(
+                                onClick = { currentScreen = NovaScreen.CHAT },
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .testTag("nav_chat")
+                            ) {
+                                Icon(
+                                    imageVector = if (currentScreen == NovaScreen.CHAT) NovaScreen.CHAT.selectedIcon else NovaScreen.CHAT.unselectedIcon,
+                                    contentDescription = "Chat",
+                                    tint = if (currentScreen == NovaScreen.CHAT) WarmAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = { currentScreen = NovaScreen.BROWSER },
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .testTag("nav_browser")
+                            ) {
+                                Icon(
+                                    imageVector = if (currentScreen == NovaScreen.BROWSER) NovaScreen.BROWSER.selectedIcon else NovaScreen.BROWSER.unselectedIcon,
+                                    contentDescription = "Browser",
+                                    tint = if (currentScreen == NovaScreen.BROWSER) WarmAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+
                             // Command Palette Trigger
                             Surface(
                                 shape = RoundedCornerShape(16.dp),
@@ -202,6 +297,7 @@ fun NovaApp(
                     }
                 }
             }
+        }
         }
     }
 

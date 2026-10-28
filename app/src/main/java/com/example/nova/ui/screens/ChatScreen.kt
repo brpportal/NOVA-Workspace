@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -44,7 +45,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -53,7 +53,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -212,7 +211,7 @@ fun ChatScreen(
                 },
                 navigationIcon = {
                     IconButton(
-                        onClick = { showConversationsSheet = true },
+                        onClick = { showConversationsSheet = !showConversationsSheet },
                         modifier = Modifier.testTag("chat_menu_button")
                     ) {
                         Icon(Icons.Default.Menu, contentDescription = "Conversations", tint = MaterialTheme.colorScheme.onSurface)
@@ -329,6 +328,110 @@ fun ChatScreen(
                                 modifier = Modifier.size(32.dp).testTag("cancel_task_button")
                             ) {
                                 Icon(Icons.Default.Stop, contentDescription = "Cancel task", tint = WarmError)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Conversations list — lives on the Chat page directly under
+            // the header (toggled by the header menu button); rename and
+            // delete stay available on every row.
+            if (showConversationsSheet) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(16.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .testTag("conversations_panel")
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Conversations",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            IconButton(
+                                onClick = {
+                                    scope.launch {
+                                        val newConv = repository.createConversation("New Chat")
+                                        activeConversationId = newConv.id
+                                        showConversationsSheet = false
+                                    }
+                                },
+                                modifier = Modifier.testTag("drawer_new_chat_button")
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = "New Conversation", tint = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(240.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(conversations, key = { it.id }) { conv ->
+                                val isSelected = conv.id == activeConversationId
+                                Surface(
+                                    color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            activeConversationId = conv.id
+                                            showConversationsSheet = false
+                                        }
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = conv.title,
+                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
+                                            ),
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        IconButton(
+                                            onClick = {
+                                                showRenameDialog = conv
+                                                renameTitleInput = conv.title
+                                            },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(Icons.Default.Edit, contentDescription = "Rename", tint = StoneMuted, modifier = Modifier.size(16.dp))
+                                        }
+                                        IconButton(
+                                            onClick = {
+                                                scope.launch {
+                                                    repository.chatDao.deleteMessagesForConversation(conv.id)
+                                                    repository.chatDao.deleteConversationById(conv.id)
+                                                    if (activeConversationId == conv.id) {
+                                                        activeConversationId = null
+                                                    }
+                                                }
+                                            },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = WarmError, modifier = Modifier.size(16.dp))
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -487,10 +590,13 @@ fun ChatScreen(
                 }
             }
 
-            // Pill-shaped chat input bar
+            // Pill-shaped chat input bar. imePadding() lifts the whole
+            // input row above the on-screen keyboard so the text being
+            // typed never hides behind it (edge-to-edge IME insets).
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .imePadding()
                     .padding(horizontal = 16.dp, vertical = 10.dp)
             ) {
                 Surface(
@@ -573,107 +679,6 @@ fun ChatScreen(
                                 tint = if (canSend) MaterialTheme.colorScheme.onPrimary else StoneLight,
                                 modifier = Modifier.size(18.dp)
                             )
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Conversations Drawer / Bottom Sheet
-    if (showConversationsSheet) {
-        val sheetState = rememberModalBottomSheetState()
-        ModalBottomSheet(
-            onDismissRequest = { showConversationsSheet = false },
-            sheetState = sheetState,
-            containerColor = MaterialTheme.colorScheme.surface
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 8.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Conversations",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                    )
-                    Spacer(modifier = Modifier.weight(1f))
-                    IconButton(
-                        onClick = {
-                            scope.launch {
-                                val newConv = repository.createConversation("New Chat")
-                                activeConversationId = newConv.id
-                                showConversationsSheet = false
-                            }
-                        },
-                        modifier = Modifier.testTag("drawer_new_chat_button")
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = "New Conversation", tint = MaterialTheme.colorScheme.primary)
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(300.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    items(conversations, key = { it.id }) { conv ->
-                        val isSelected = conv.id == activeConversationId
-                        Surface(
-                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    activeConversationId = conv.id
-                                    showConversationsSheet = false
-                                }
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = conv.title,
-                                    style = MaterialTheme.typography.bodyMedium.copy(
-                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
-                                    ),
-                                    modifier = Modifier.weight(1f)
-                                )
-                                IconButton(
-                                    onClick = {
-                                        showRenameDialog = conv
-                                        renameTitleInput = conv.title
-                                    },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Rename", tint = StoneMuted, modifier = Modifier.size(16.dp))
-                                }
-                                IconButton(
-                                    onClick = {
-                                        scope.launch {
-                                            repository.chatDao.deleteMessagesForConversation(conv.id)
-                                            repository.chatDao.deleteConversationById(conv.id)
-                                            if (activeConversationId == conv.id) {
-                                                activeConversationId = null
-                                            }
-                                        }
-                                    },
-                                    modifier = Modifier.size(28.dp)
-                                ) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = WarmError, modifier = Modifier.size(16.dp))
-                                }
-                            }
                         }
                     }
                 }

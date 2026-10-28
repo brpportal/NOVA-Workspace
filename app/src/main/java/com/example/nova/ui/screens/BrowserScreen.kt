@@ -49,10 +49,14 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PinDrop
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -92,7 +96,6 @@ import com.example.nova.data.BrowserHistoryEntry
 import com.example.nova.data.NovaRepository
 import com.example.nova.ui.components.AICursorOverlay
 import com.example.nova.ui.components.AIKeystrokeOverlay
-import com.example.nova.ui.components.LiveControlBanner
 import com.example.ui.theme.StoneLight
 import com.example.ui.theme.StoneMuted
 import com.example.ui.theme.WarmAccent
@@ -135,8 +138,11 @@ fun BrowserScreen(
     var sslAlertDialog by remember { mutableStateOf<String?>(null) }
     var showAgentLogPanel by remember { mutableStateOf(false) }
     var isSetOfMarksActive by remember { mutableStateOf(false) }
+    var showOverflowMenu by remember { mutableStateOf(false) }
 
     val bookmarks by repository.bookmarks.collectAsState(initial = emptyList())
+    val tasks by repository.tasks.collectAsState(initial = emptyList())
+    val runningBrowserTask = tasks.firstOrNull { it.status == "RUNNING" || it.status == "PENDING" }
 
     LaunchedEffect(tabState.url) {
         urlInputText = tabState.url
@@ -147,66 +153,131 @@ fun BrowserScreen(
     }
 
     Column(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        // --- LIVE CONTROL & HUMAN VS AI COPILOT BANNER ---
-        LiveControlBanner(
-            controlMode = controlMode,
-            onTakeOver = {
-                browserController.takeManualControl("User manually engaged control (CAPTCHA/Login)")
-            },
-            onReturnToAI = {
-                scope.launch {
-                    browserController.returnToAI()
-                    Toast.makeText(context, "Resumed AI control. Webpage re-verified.", Toast.LENGTH_SHORT).show()
-                }
-            },
-            onPause = { browserController.updateControlMode(BrowserControlMode.PAUSED) },
-            onResume = { browserController.updateControlMode(BrowserControlMode.AGENT_ACTIVE) },
-            onEmergencyStop = {
-                browserController.emergencyStop()
-                Toast.makeText(context, "Emergency stop executed.", Toast.LENGTH_SHORT).show()
-            }
-        )
-
-        // --- AGENT REASONING / PLAN CHIP ---
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outline),
+        // --- BROWSER HEADER ROW: "On this phone" chip + true control
+        // state + 3-dots overflow menu. Everything that used to sit on
+        // this screen (back/forward/reload, View Log, agent plan,
+        // Set-of-Marks, Teach Mode, Bookmarks) lives in the menu now;
+        // the page itself is WebView + this header + the 2-button
+        // bottom bar. ---
+        val controlStateText = when (controlMode) {
+            BrowserControlMode.AGENT_ACTIVE -> "AI is controlling the browser"
+            BrowserControlMode.WAITING_APPROVAL -> "Waiting for your approval"
+            BrowserControlMode.MANUAL_CONTROL -> "You're in control"
+            BrowserControlMode.PAUSED -> "Paused \u2014 you're in control"
+            BrowserControlMode.STANDBY -> "Standby \u2014 you're in control"
+        }
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 2.dp)
-                .clickable { showAgentLogPanel = !showAgentLogPanel }
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.primaryContainer
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "On this phone",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.primary
+                    ),
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = controlStateText,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                ),
+                modifier = Modifier.weight(1f).testTag("browser_control_state_text")
+            )
+            Box {
+                IconButton(
+                    onClick = { showOverflowMenu = true },
+                    modifier = Modifier.size(36.dp).testTag("browser_overflow_button")
+                ) {
                     Icon(
-                        imageVector = Icons.Default.AutoAwesome,
-                        contentDescription = null,
-                        tint = WarmAccent,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "Agent Plan: $currentPlan",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        ),
-                        maxLines = 1
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "Browser menu",
+                        tint = MaterialTheme.colorScheme.onSurface
                     )
                 }
-                Text(
-                    text = if (showAgentLogPanel) "Hide Log" else "View Log",
-                    style = MaterialTheme.typography.labelSmall.copy(color = WarmAccent, fontWeight = FontWeight.Bold)
-                )
+                DropdownMenu(
+                    expanded = showOverflowMenu,
+                    onDismissRequest = { showOverflowMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Back") },
+                        enabled = tabState.canGoBack,
+                        onClick = { showOverflowMenu = false; browserController.goBack() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Forward") },
+                        enabled = tabState.canGoForward,
+                        onClick = { showOverflowMenu = false; browserController.goForward() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Reload") },
+                        onClick = { showOverflowMenu = false; browserController.reload() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (showAgentLogPanel) "Hide Log" else "View Log") },
+                        onClick = { showOverflowMenu = false; showAgentLogPanel = !showAgentLogPanel }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Agent Plan") },
+                        enabled = false,
+                        onClick = {}
+                    )
+                    DropdownMenuItem(
+                        text = { Text(currentPlan, fontSize = 12.sp, color = StoneMuted) },
+                        enabled = false,
+                        onClick = {}
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (isSetOfMarksActive) "Hide Set-of-Marks" else "Show Set-of-Marks") },
+                        onClick = {
+                            showOverflowMenu = false
+                            scope.launch {
+                                if (isSetOfMarksActive) {
+                                    browserController.clearSetOfMarks()
+                                    isSetOfMarksActive = false
+                                } else {
+                                    browserController.injectSetOfMarks()
+                                    isSetOfMarksActive = true
+                                    Toast.makeText(context, "Set-of-Marks injected", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (isTeachMode) "Stop Teach Mode" else "Start Teach Mode") },
+                        onClick = {
+                            showOverflowMenu = false
+                            scope.launch {
+                                if (isTeachMode) {
+                                    browserController.stopTeachMode(repository.workspaceManager)
+                                    Toast.makeText(context, "Teach workflow recorded into Training.md", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    browserController.startTeachMode()
+                                    Toast.makeText(context, "Teach Mode: recording your actions", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Bookmarks") },
+                        onClick = { showOverflowMenu = false; showBookmarksSheet = true }
+                    )
+                }
             }
         }
 
-        // Expandable Agent Log Panel
+        // Expandable Agent Log Panel (toggled from the overflow menu)
         AnimatedVisibility(visible = showAgentLogPanel) {
             Surface(
                 shape = RoundedCornerShape(12.dp),
@@ -216,6 +287,11 @@ fun BrowserScreen(
                     .padding(horizontal = 12.dp, vertical = 4.dp)
             ) {
                 Column(modifier = Modifier.padding(10.dp)) {
+                    Text(
+                        text = "Plan: $currentPlan",
+                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = "Current Step: $currentStep",
                         style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
@@ -231,7 +307,7 @@ fun BrowserScreen(
                             item { Text("No agent actions recorded in this session.", fontSize = 11.sp, color = StoneLight) }
                         } else {
                             items(actionLogs) { log ->
-                                Text("• $log", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("\u2022 $log", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -251,46 +327,6 @@ fun BrowserScreen(
                         .padding(horizontal = 8.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        modifier = Modifier.padding(end = 4.dp)
-                    ) {
-                        Text(
-                            text = "On this phone",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.primary
-                            ),
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { browserController.goBack() },
-                        enabled = tabState.canGoBack,
-                        modifier = Modifier.size(36.dp).testTag("browser_back_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back",
-                            tint = if (tabState.canGoBack) MaterialTheme.colorScheme.onSurface else StoneLight
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { browserController.goForward() },
-                        enabled = tabState.canGoForward,
-                        modifier = Modifier.size(36.dp).testTag("browser_forward_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                            contentDescription = "Forward",
-                            tint = if (tabState.canGoForward) MaterialTheme.colorScheme.onSurface else StoneLight
-                        )
-                    }
-
                     // Pill-shaped address bar
                     Surface(
                         shape = RoundedCornerShape(24.dp),
@@ -346,60 +382,6 @@ fun BrowserScreen(
                                 }
                             }
                         }
-                    }
-
-                    // Set-of-Marks visual toggle
-                    IconButton(
-                        onClick = {
-                            scope.launch {
-                                if (isSetOfMarksActive) {
-                                    browserController.clearSetOfMarks()
-                                    isSetOfMarksActive = false
-                                } else {
-                                    browserController.injectSetOfMarks()
-                                    isSetOfMarksActive = true
-                                    Toast.makeText(context, "Set-of-Marks injected", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        },
-                        modifier = Modifier.size(34.dp).testTag("som_toggle_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PinDrop,
-                            contentDescription = "Set-of-Marks",
-                            tint = if (isSetOfMarksActive) WarmAccent else StoneMuted,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    // Teach Mode recording toggle
-                    IconButton(
-                        onClick = {
-                            scope.launch {
-                                if (isTeachMode) {
-                                    browserController.stopTeachMode(repository.workspaceManager)
-                                    Toast.makeText(context, "Teach workflow recorded into Training.md", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    browserController.startTeachMode()
-                                    Toast.makeText(context, "Teach Mode: recording your actions", Toast.LENGTH_SHORT).show()
-                                }
-                            }
-                        },
-                        modifier = Modifier.size(34.dp).testTag("teach_mode_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FiberManualRecord,
-                            contentDescription = "Teach Mode",
-                            tint = if (isTeachMode) WarmError else StoneMuted,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = { showBookmarksSheet = true },
-                        modifier = Modifier.size(34.dp).testTag("browser_bookmarks_button")
-                    ) {
-                        Icon(Icons.Default.BookmarkBorder, contentDescription = "Bookmarks", tint = StoneMuted, modifier = Modifier.size(18.dp))
                     }
                 }
 
@@ -524,6 +506,63 @@ fun BrowserScreen(
                 contentAlignment = Alignment.Center
             ) {
                 AIKeystrokeOverlay(keystrokeState = aiKeystrokeState)
+            }
+        }
+
+        // --- BROWSER BOTTOM BAR: exactly two buttons, state-driven ---
+        // Button 1 flips with the real control state (Take control <->
+        // Hand back to the agent); button 2 stops the running task.
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            shadowElevation = 6.dp,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val userInControl = controlMode == BrowserControlMode.MANUAL_CONTROL
+                Button(
+                    onClick = {
+                        if (userInControl) {
+                            scope.launch {
+                                browserController.returnToAI()
+                                Toast.makeText(context, "Handed back to the agent.", Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            browserController.takeManualControl("User took control from the Browser screen")
+                        }
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("browser_control_toggle_button"),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (userInControl) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Text(
+                        text = if (userInControl) "Hand back to the agent" else "Take control",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        runningBrowserTask?.let { repository.cancelTask(it.id) }
+                    },
+                    enabled = runningBrowserTask != null,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("browser_stop_task_button"),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text("Stop Task", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
             }
         }
     }

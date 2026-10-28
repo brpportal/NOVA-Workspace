@@ -21,7 +21,7 @@ class ProviderErrorSummaryTest {
     fun `openrouter cohere nested error drills down to the innermost message`() {
         // The exact shape from Al's failed task: OpenRouter wrapping
         // Cohere's error inside metadata.raw as a JSON string.
-        val raw = """API Error (400): {"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\"id\":\"d7d514f5\",\"message\":\"invalid tool message at messages[3]: tool call id 'navigate_q3zgwemc1mym' not found in previous tool calls\"}","provider_name":"Cohere","is_byok":false},"user_id":"user_3LJO9X2c"}"""
+        val raw = """API Error (400): {"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\"id\":\"d7d514f5\",\"message\":\"invalid tool message at messages[3]: tool call id 'navigate_q3zgwemc1mym' not found in previous tool calls\"}","provider_name":"Cohere","is_byok":false}},"user_id":"user_3LJO9X2c"}"""
         val summary = ProviderErrors.summarizeErrorText(raw)
         assertTrue(summary.startsWith("Provider error (400): "))
         assertTrue(summary.contains("invalid tool message at messages[3]"))
