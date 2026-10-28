@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.NovaWorkspace" parent="android:Theme.Material.NoActionBar" />
+</resources>

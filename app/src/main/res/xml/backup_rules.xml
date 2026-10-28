@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- M1 stores almost nothing. Secrets (M6) must be excluded from backup in later milestones. -->
+</full-backup-content>
