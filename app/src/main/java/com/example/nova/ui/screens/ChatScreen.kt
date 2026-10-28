@@ -133,10 +133,30 @@ fun ChatScreen(
     var showRenameDialog by remember { mutableStateOf<ConversationEntity?>(null) }
     var renameTitleInput by remember { mutableStateOf("") }
 
-    // Summarize Into Memory state
+    // Summarize Into Memory state — the provider call runs in the
+    // repository's application-lifetime scope (see
+    // NovaRepository.requestConversationSummary); this screen only observes
+    // the outcome, so switching tabs mid-call can no longer kill it or leak
+    // a raw composition-scope exception as a toast.
     var showSummarizeDialog by remember { mutableStateOf(false) }
-    var isSummarizingMemory by remember { mutableStateOf(false) }
     var proposedMemorySummary by remember { mutableStateOf("") }
+    val summarizeState by repository.summarizeState.collectAsState()
+    val isSummarizingMemory = summarizeState is NovaRepository.SummarizeUiState.Loading
+
+    LaunchedEffect(summarizeState) {
+        when (val state = summarizeState) {
+            is NovaRepository.SummarizeUiState.Ready -> {
+                proposedMemorySummary = state.text
+                showSummarizeDialog = true
+                repository.consumeSummarizeState()
+            }
+            is NovaRepository.SummarizeUiState.Failed -> {
+                Toast.makeText(context, "Summarize failed: ${state.message}", Toast.LENGTH_LONG).show()
+                repository.consumeSummarizeState()
+            }
+            else -> {}
+        }
+    }
 
     // Select first conversation if none selected
     LaunchedEffect(conversations) {
@@ -199,27 +219,16 @@ fun ChatScreen(
                     }
                 },
                 actions = {
-                    // Summarize into memory action
+                    // Summarize into memory action — delegated to the
+                    // repository (application scope); result arrives via
+                    // summarizeState above.
                     IconButton(
                         onClick = {
-                            scope.launch {
-                                if (messages.isEmpty()) {
-                                    Toast.makeText(context, "No messages in this chat to summarize", Toast.LENGTH_SHORT).show()
-                                    return@launch
-                                }
-                                isSummarizingMemory = true
-                                try {
-                                    val provider = repository.getActiveProvider()
-                                    val conversationText = messages.joinToString("\n") { "${it.sender}: ${it.content}" }
-                                    val prompt = "Extract durable facts, user preferences, and key context from this conversation into concise markdown bullet points. Do NOT copy verbatim messages. Return ONLY the bullet points:\n\n$conversationText"
-                                    val response = provider.sendMessage(listOf(AIMessage(role = "user", content = prompt)), emptyList())
-                                    proposedMemorySummary = response.text.orEmpty().ifBlank { "- User preference logged from conversation" }
-                                    showSummarizeDialog = true
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "Summarize failed: ${e.message}", Toast.LENGTH_LONG).show()
-                                } finally {
-                                    isSummarizingMemory = false
-                                }
+                            val convId = activeConversationId
+                            if (convId == null || messages.isEmpty()) {
+                                Toast.makeText(context, "No messages in this chat to summarize", Toast.LENGTH_SHORT).show()
+                            } else {
+                                repository.requestConversationSummary(convId)
                             }
                         },
                         enabled = !isSummarizingMemory,

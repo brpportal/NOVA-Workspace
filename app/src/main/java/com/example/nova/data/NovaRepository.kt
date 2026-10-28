@@ -54,6 +54,57 @@ class NovaRepository(
 
     val pipelinePresence = MutableStateFlow(PipelinePresence.READY)
 
+    /** State of a "Summarize into memory" request (see [requestConversationSummary]). */
+    sealed interface SummarizeUiState {
+        data object Idle : SummarizeUiState
+        data object Loading : SummarizeUiState
+        data class Ready(val text: String) : SummarizeUiState
+        data class Failed(val message: String) : SummarizeUiState
+    }
+
+    val summarizeState = MutableStateFlow<SummarizeUiState>(SummarizeUiState.Idle)
+
+    /**
+     * Runs the conversation-summary provider call in the REPOSITORY's
+     * application-lifetime scope — never in a Compose composition scope.
+     * (Previously ChatScreen launched it from rememberCoroutineScope; when
+     * the user switched tabs mid-call, the composition scope died and the
+     * raw "The coroutine scope left the composition" exception surfaced as
+     * a toast over another screen.) The result is delivered through
+     * [summarizeState]: it survives tab switches, and failures are already
+     * mapped to human text by [ProviderErrors].
+     */
+    fun requestConversationSummary(conversationId: String) {
+        if (summarizeState.value is SummarizeUiState.Loading) return
+        summarizeState.value = SummarizeUiState.Loading
+        scope.launch {
+            try {
+                val msgs = chatDao.getMessagesForConversation(conversationId).firstOrNull().orEmpty()
+                if (msgs.isEmpty()) {
+                    summarizeState.value = SummarizeUiState.Failed("No messages in this chat to summarize")
+                    return@launch
+                }
+                val unavailable = providerUnavailableReason()
+                if (unavailable != null) {
+                    summarizeState.value = SummarizeUiState.Failed(unavailable)
+                    return@launch
+                }
+                val provider = getActiveProvider()
+                val conversationText = msgs.joinToString("\n") { "${it.sender}: ${it.content}" }
+                val prompt = "Extract durable facts, user preferences, and key context from this conversation into concise markdown bullet points. Do NOT copy verbatim messages. Return ONLY the bullet points:\n\n$conversationText"
+                val response = provider.sendMessage(listOf(AIMessage(role = "user", content = prompt)), emptyList())
+                val text = response.text.orEmpty().ifBlank { "- User preference logged from conversation" }
+                summarizeState.value = SummarizeUiState.Ready(text)
+            } catch (e: Exception) {
+                summarizeState.value = SummarizeUiState.Failed(ProviderErrors.userMessage(e))
+            }
+        }
+    }
+
+    fun consumeSummarizeState() {
+        summarizeState.value = SummarizeUiState.Idle
+    }
+
     val agentLoop = AgentLoop(
         taskDao = taskDao,
         chatDao = chatDao,

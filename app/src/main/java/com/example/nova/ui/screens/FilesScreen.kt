@@ -100,6 +100,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.nova.ai.ProviderErrors
 import com.example.nova.data.NovaRepository
 import com.example.nova.ui.components.MarkdownText
 import com.example.nova.ui.components.NovaBadge
@@ -188,7 +189,7 @@ fun FilesScreen(
                     Toast.makeText(context, "Uploaded $displayName", Toast.LENGTH_SHORT).show()
                     reloadTrigger++
                 } catch (e: Exception) {
-                    Toast.makeText(context, "Upload failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Upload failed: ${ProviderErrors.userMessage(e)}", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -419,7 +420,7 @@ fun FilesScreen(
                                                 viewingTextPath = Pair(agentFile.relativePath, content)
                                             }
                                         } catch (e: Exception) {
-                                            Toast.makeText(context, "Read error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(context, "Read error: ${ProviderErrors.userMessage(e)}", Toast.LENGTH_SHORT).show()
                                         }
                                     }
                             ) {
@@ -677,7 +678,7 @@ fun FilesScreen(
                                     try {
                                         metadataToShow = wm.getFileMetadata(file.relativePath)
                                     } catch (e: Exception) {
-                                        Toast.makeText(context, "Metadata error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "Metadata error: ${ProviderErrors.userMessage(e)}", Toast.LENGTH_SHORT).show()
                                     }
                                 },
                                 onRename = {
@@ -872,7 +873,7 @@ fun FilesScreen(
                             editingFilePath = null
                             reloadTrigger++
                         } catch (e: Exception) {
-                            Toast.makeText(context, "Save error: ${e.message}", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Save error: ${ProviderErrors.userMessage(e)}", Toast.LENGTH_SHORT).show()
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
@@ -959,7 +960,7 @@ fun FilesScreen(
                                 editingFilePath = rel
                                 reloadTrigger++
                             } catch (e: Exception) {
-                                Toast.makeText(context, "Create error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Create error: ${ProviderErrors.userMessage(e)}", Toast.LENGTH_SHORT).show()
                             }
                         }
                     },
@@ -1001,7 +1002,7 @@ fun FilesScreen(
                                 newFolderNameInput = ""
                                 reloadTrigger++
                             } catch (e: Exception) {
-                                Toast.makeText(context, "Create folder error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Create folder error: ${ProviderErrors.userMessage(e)}", Toast.LENGTH_SHORT).show()
                             }
                         }
                     },
@@ -1031,7 +1032,7 @@ fun FilesScreen(
                             fileToDelete = null
                             reloadTrigger++
                         } catch (e: Exception) {
-                            Toast.makeText(context, "Delete error: ${e.message}", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Delete error: ${ProviderErrors.userMessage(e)}", Toast.LENGTH_SHORT).show()
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = WarmError),
@@ -1100,7 +1101,7 @@ fun FilesScreen(
                                 fileToRename = null
                                 reloadTrigger++
                             } catch (e: Exception) {
-                                Toast.makeText(context, "Rename error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Rename error: ${ProviderErrors.userMessage(e)}", Toast.LENGTH_SHORT).show()
                             }
                         }
                     },
@@ -1159,7 +1160,7 @@ private fun handleFileClick(
                 val content = wm.readFileWithLimit(file.relativePath)
                 onOpenEditor(file.relativePath, content)
             } catch (e: Exception) {
-                Toast.makeText(context, "Read error: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Read error: ${ProviderErrors.userMessage(e)}", Toast.LENGTH_SHORT).show()
             }
         } else {
             Toast.makeText(context, "File: ${file.name} (${file.extension.uppercase()})", Toast.LENGTH_SHORT).show()

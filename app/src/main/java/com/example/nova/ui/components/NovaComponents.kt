@@ -297,7 +297,10 @@ fun LiveControlBanner(
                             isManual -> "You're in control"
                             isPaused -> "SESSION PAUSED"
                             isWaiting -> "Needs you"
-                            else -> "STANDBY"
+                            // STANDBY means no agent is driving: the user
+                            // holds the browser. Say exactly that — a bare
+                            // "STANDBY" left users unsure who was in control.
+                            else -> "You're in control"
                         },
                         style = MaterialTheme.typography.labelSmall.copy(
                             fontWeight = FontWeight.Bold,
@@ -316,7 +319,7 @@ fun LiveControlBanner(
                             isManual -> "Needs you: Manual input / CAPTCHA step"
                             isPaused -> "Agent paused"
                             isWaiting -> "Needs you: Pending approval"
-                            else -> "Human & AI co-pilot ready"
+                            else -> "Standby — Spark takes over when a task uses the browser"
                         },
                         style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp, color = StoneLight)
                     )
@@ -355,6 +358,25 @@ fun LiveControlBanner(
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = WarmAccent,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                } else {
+                    // Standby / paused / waiting: the user already has
+                    // control, so Hand back is shown disabled (with the
+                    // state text explaining why) instead of disappearing —
+                    // the control bar must always say who is in control.
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+                        modifier = Modifier.testTag("return_to_ai_disabled")
+                    ) {
+                        Text(
+                            text = "Hand back to the agent",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = StoneLight,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                         )
                     }

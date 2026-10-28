@@ -196,10 +196,15 @@ class OpenAICompatibleProvider(
         messages: List<AIMessage>,
         tools: List<AIToolDefinition>
     ): AIResponse = withContext(Dispatchers.IO) {
+        // Strict backends behind OpenAI-compatible routers (e.g. Cohere via
+        // OpenRouter) reject histories whose tool messages reference tool_call
+        // ids the preceding assistant message never declared (HTTP 400).
+        // Repair the sequence at request time; ids are never invented here.
+        val safeMessages = ToolHistorySanitizer.sanitize(messages).messages
         val payload = JSONObject().apply {
             put("model", model)
             val msgsArr = JSONArray()
-            for (m in messages) {
+            for (m in safeMessages) {
                 val mObj = JSONObject().apply {
                     put("role", m.role)
                     put("content", m.content)

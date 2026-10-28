@@ -51,10 +51,29 @@ class AgentLoop(
     // Map of active running jobs per taskId
     private val activeJobs = ConcurrentHashMap<String, Job>()
 
+    /** Persistent failure memory (Lessons.md in the workspace root). */
+    private val lessonsStore = LessonsStore(workspaceManager)
+
     companion object {
         /** Bounds for stored browser-screenshot evidence per task. */
         const val MAX_TASK_SCREENSHOTS = 12
         const val MAX_SCREENSHOT_BYTES = 5L * 1024 * 1024
+
+        /** Tools that drive the in-app browser (vs workspace/memory tools). */
+        val BROWSER_TOOL_NAMES = setOf(
+            "navigate", "get_current_url", "get_page_title", "get_visible_text",
+            "find_element", "click", "type", "scroll", "take_screenshot",
+            "get_page_state", "get_set_of_marks", "clear_set_of_marks",
+            "observe_page", "click_element", "type_text", "tap",
+            "browser_back", "browser_forward", "browser_reload", "wait_for_load",
+            "vault_autofill"
+        )
+
+        /** Browser actions after which the loop attaches a fresh observation. */
+        val PAGE_CHANGING_TOOLS = setOf(
+            "navigate", "click", "click_element", "tap",
+            "browser_back", "browser_forward", "browser_reload"
+        )
     }
 
     fun registerJob(taskId: String, job: Job) {
@@ -81,8 +100,25 @@ class AgentLoop(
         taskDao.updateTask(currentTask)
 
         val messages = mutableListOf<AIMessage>()
-        messages.add(contextBuilder.buildSystemContext())
+        messages.add(contextBuilder.buildSystemContext(forTask = true))
         messages.add(AIMessage(role = "user", content = task.prompt))
+
+        // Failure learning: repeated tool errors and terminal task failures
+        // are written to Lessons.md (deduplicated there) and read back into
+        // the context of future tasks via ContextBuilder.
+        val toolFailureCounts = mutableMapOf<String, Int>()
+        val lessonRecordedForTools = mutableSetOf<String>()
+        var lastFailedStep = ""
+        var lastFailedTool: String? = null
+        fun noteToolFailure(tool: String, stepDesc: String, errorText: String) {
+            lastFailedStep = stepDesc
+            lastFailedTool = tool
+            val count = (toolFailureCounts[tool] ?: 0) + 1
+            toolFailureCounts[tool] = count
+            if (count >= 2 && lessonRecordedForTools.add(tool)) {
+                lessonsStore.recordLesson(task.title, stepDesc, tool, errorText)
+            }
+        }
 
         var stepNumber = 1
         var duplicateCount = 0
@@ -119,14 +155,45 @@ class AgentLoop(
                 taskDao.updateTask(currentTask)
                 onPresenceChange(PipelinePresence.COMPOSING)
 
+                // Repair the tool history before EVERY request: a tool result
+                // whose tool_call id was never declared by the preceding
+                // assistant message makes strict providers (Cohere via
+                // OpenRouter) fail the whole task with HTTP 400. Repairs are
+                // logged, never silent.
+                val sanitized = com.example.nova.ai.ToolHistorySanitizer.sanitize(messages)
+                if (sanitized.repairs > 0) {
+                    val note = "Repaired tool history before the provider request: dropped/trimmed ${sanitized.repairs} invalid tool entr${if (sanitized.repairs == 1) "y" else "ies"} so every tool result matches a declared tool call."
+                    stepsRecord.add(note)
+                    logBuffer.append("[${Date()}] $note\n")
+                    messages.clear()
+                    messages.addAll(sanitized.messages)
+                }
+
                 val response = provider.sendMessage(messages, toolRegistry.availableTools)
 
-                // If response has assistant text: keep it in the model history.
-                // Per-step narration belongs to the task's step log, NOT the
-                // chat — only the final answer is posted to chat, once
-                // (fix-round behaviour, restored in the Spark merge).
+                // Keep the assistant turn in the model history. When the model
+                // calls tools, the history MUST contain ONE assistant message
+                // carrying BOTH the text and the tool calls — with the
+                // provider-issued ids verbatim — because the tool results
+                // appended below reference those ids. (Previously only the
+                // text was stored, and when the text was blank no assistant
+                // message was stored at all, orphaning every tool result and
+                // failing the next request.) Per-step narration belongs to
+                // the task's step log, NOT the chat — only the final answer
+                // is posted to chat, once (fix-round behaviour).
                 val assistantText = response.text.orEmpty()
-                if (assistantText.isNotBlank()) {
+                if (response.toolCalls.isNotEmpty()) {
+                    if (assistantText.isNotBlank()) {
+                        onPresenceChange(PipelinePresence.RESPONDING)
+                    }
+                    messages.add(
+                        AIMessage(
+                            role = "assistant",
+                            content = assistantText,
+                            toolCalls = response.toolCalls
+                        )
+                    )
+                } else if (assistantText.isNotBlank()) {
                     onPresenceChange(PipelinePresence.RESPONDING)
                     messages.add(AIMessage(role = "assistant", content = assistantText))
                 }
@@ -219,6 +286,7 @@ class AgentLoop(
                     if (!validation.isValid) {
                         val errMsg = validation.errorMessage ?: "Invalid tool call arguments"
                         recordStep(taskId, stepNumber++, toolCall.name, toolCall.argumentsJson, errMsg, "FAILED")
+                        noteToolFailure(toolCall.name, "${toolCall.name} (step ${stepNumber - 1})", errMsg)
                         messages.add(AIMessage(role = "tool", content = "Error: $errMsg", toolCallId = toolCall.id, name = toolCall.name))
                         continue
                     }
@@ -242,6 +310,7 @@ class AgentLoop(
 
                     if (decision == PermissionDecision.DENIED) {
                         recordStep(taskId, stepNumber++, toolCall.name, toolCall.argumentsJson, "Permission denied by security policy", "SKIPPED")
+                        noteToolFailure(toolCall.name, "${toolCall.name} (step ${stepNumber - 1})", "Permission denied by security policy")
                         messages.add(AIMessage(role = "tool", content = "Permission Denied: Security policy blocks ${toolCall.name}.", toolCallId = toolCall.id, name = toolCall.name))
                         continue
                     }
@@ -279,6 +348,9 @@ class AgentLoop(
                         )
                         taskDao.updateTask(currentTask)
                         onPresenceChange(PipelinePresence.NEEDS_APPROVAL)
+                        // The Browser banner must show the truth here too:
+                        // the agent is stopped and needs the user.
+                        browserController.updateControlMode(BrowserControlMode.WAITING_APPROVAL)
                         return@withContext // Task paused until user clicks Approve in UI
                     }
 
@@ -288,6 +360,18 @@ class AgentLoop(
                         updatedAt = System.currentTimeMillis()
                     )
                     taskDao.updateTask(currentTask)
+
+                    // Drive the browser control state from reality: the first
+                    // browser action of a run means the AI is now controlling
+                    // the browser, so the Browser tab banner switches from
+                    // STANDBY to "AI IS CONTROLLING" and offers Take control.
+                    // (Nothing set this before — the banner stayed on STANDBY
+                    // for the whole task and Take control never appeared.)
+                    if (toolCall.name in BROWSER_TOOL_NAMES &&
+                        browserController.controlMode.value == BrowserControlMode.STANDBY
+                    ) {
+                        browserController.updateControlMode(BrowserControlMode.AGENT_ACTIVE)
+                    }
 
                     val startTime = System.currentTimeMillis()
                     val result = toolExecutor.execute(toolCall.name, parsedArgs, domain)
@@ -351,6 +435,14 @@ class AgentLoop(
                         status = if (result.success) "SUCCESS" else "FAILED"
                     )
 
+                    if (!result.success) {
+                        noteToolFailure(
+                            toolCall.name,
+                            "${toolCall.name} (step ${stepNumber - 1})",
+                            result.error ?: result.output
+                        )
+                    }
+
                     stepsRecord.add("${toolCall.name}: ${if (result.success) "Success" else "Failed"} - ${result.output.take(80)}")
                     logBuffer.append("[${Date()}] Step ${stepNumber - 1}: ${toolCall.name} -> ${result.output.take(120)}\n")
                     browserController.setPlanAndStep("Task: ${task.title}", "Step ${stepNumber - 1}: ${toolCall.name}")
@@ -366,11 +458,31 @@ class AgentLoop(
                         )
                     )
 
-                    // Feed tool result back to agent message chain
+                    // Feed tool result back to agent message chain. After a
+                    // page-changing browser action, attach a fresh page
+                    // observation (URL + title + numbered interactive
+                    // elements + text excerpt) so the next decision is
+                    // grounded in the real page instead of guessed selectors
+                    // — the observe → act → verify loop from the playbook.
+                    var feedback = result.output
+                    val pageChanged = result.success && (
+                        toolCall.name in PAGE_CHANGING_TOOLS ||
+                            (toolCall.name == "type_text" && parsedArgs.optBoolean("submit", false))
+                        )
+                    if (pageChanged) {
+                        val observation = try {
+                            browserController.observePage()
+                        } catch (ignored: Exception) {
+                            null
+                        }
+                        if (observation != null) {
+                            feedback += "\n\n" + observation.formatForModel()
+                        }
+                    }
                     messages.add(
                         AIMessage(
                             role = "tool",
-                            content = result.output,
+                            content = feedback,
                             toolCallId = toolCall.id,
                             name = toolCall.name
                         )
@@ -385,6 +497,12 @@ class AgentLoop(
                         updatedAt = System.currentTimeMillis()
                     )
                     taskDao.updateTask(currentTask)
+                    lessonsStore.recordLesson(
+                        goal = task.title,
+                        failedStep = lastFailedStep.ifBlank { "step budget" },
+                        toolName = lastFailedTool,
+                        rawError = "Step limit exceeded: reached the maximum tool execution limit ($maxStepsLimit steps) without completing the task."
+                    )
                 }
             }
         } catch (e: CancellationException) {
@@ -399,15 +517,47 @@ class AgentLoop(
             if (isQuotaError) {
                 onPresenceChange(PipelinePresence.PROVIDER_LIMIT_REACHED)
             }
-            val safeMessage = com.example.nova.ai.ProviderErrors.userMessage(e)
+            // The card shows ONE short human summary; the full raw provider
+            // text is preserved in the audit trail as a step, never printed
+            // raw (and never twice) on the task card.
+            val summary = com.example.nova.ai.ProviderErrors.errorSummary(e)
+            // Learn from the failure: a deduplicated lesson in Lessons.md,
+            // read back into future tasks' context.
+            lessonsStore.recordLesson(
+                goal = task.title,
+                failedStep = lastFailedStep.ifBlank { "provider request (step $stepNumber)" },
+                toolName = lastFailedTool,
+                rawError = e.message ?: summary
+            )
+            try {
+                recordStep(
+                    taskId = taskId,
+                    stepNumber = stepNumber,
+                    toolName = "provider_request",
+                    argumentsJson = "",
+                    resultJson = (e.message ?: e.toString()).take(2000),
+                    status = "FAILED"
+                )
+            } catch (ignored: Exception) {}
             currentTask = currentTask.copy(
                 status = "FAILED",
-                currentOperation = "Task failed: $safeMessage",
-                errorMessage = safeMessage,
+                currentOperation = "Task failed: $summary",
+                errorMessage = summary,
                 updatedAt = System.currentTimeMillis()
             )
             taskDao.updateTask(currentTask)
         } finally {
+            // Return the browser to the user when the run truly ends. When
+            // the task is only PAUSED (manual control / waiting approval) the
+            // mode that describes that state is left untouched.
+            val terminal = currentTask.status in listOf("COMPLETED", "FAILED", "CANCELLED", "SAFETY_STOPPED")
+            if (terminal && browserController.controlMode.value in listOf(
+                    BrowserControlMode.AGENT_ACTIVE,
+                    BrowserControlMode.WAITING_APPROVAL
+                )
+            ) {
+                browserController.updateControlMode(BrowserControlMode.STANDBY)
+            }
             onPresenceChange(PipelinePresence.READY)
             try {
                 val citJsonStr = if (visitedCitations.isNotEmpty()) {

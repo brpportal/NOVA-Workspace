@@ -65,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
+import com.example.nova.ai.ProviderErrors
 import com.example.nova.data.AgentTaskEntity
 import com.example.nova.data.ApprovalRecordEntity
 import com.example.nova.data.NovaRepository
@@ -383,12 +384,37 @@ fun TaskCardItem(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Current operation text
-            Text(
-                text = task.currentOperation,
-                style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted),
-                maxLines = 2
-            )
+            // Current operation / failure summary. A failed task shows ONE
+            // short human summary here (the summarizer also cleans up raw
+            // provider JSON stored by older builds); the full raw error
+            // lives in the audit trail below, and the separate error block
+            // further down is skipped when it would repeat this text.
+            val failureSummary = if (task.status == "FAILED") {
+                ProviderErrors.summarizeErrorText(task.errorMessage ?: task.currentOperation)
+            } else {
+                null
+            }
+            if (failureSummary != null) {
+                Surface(
+                    color = WarmError.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(10.dp),
+                    border = BorderStroke(0.5.dp, WarmError.copy(alpha = 0.4f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = failureSummary,
+                        style = MaterialTheme.typography.bodySmall.copy(color = WarmError, fontWeight = FontWeight.Medium),
+                        maxLines = 3,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+            } else {
+                Text(
+                    text = task.currentOperation,
+                    style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted),
+                    maxLines = 2
+                )
+            }
 
             // Sources / Citations Card if browser tasks visited pages
             if (citationsList.isNotEmpty()) {
@@ -486,12 +512,14 @@ fun TaskCardItem(
                 }
             }
 
-            // Error message if failed
-            if (!task.errorMessage.isNullOrBlank()) {
+            // Error message for non-FAILED terminal states. For FAILED tasks
+            // the summary above already shows it — never print it twice.
+            if (task.status != "FAILED" && !task.errorMessage.isNullOrBlank()) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Error: ${task.errorMessage}",
-                    style = MaterialTheme.typography.bodySmall.copy(color = WarmError)
+                    text = "Error: ${ProviderErrors.summarizeErrorText(task.errorMessage!!)}",
+                    style = MaterialTheme.typography.bodySmall.copy(color = WarmError),
+                    maxLines = 3
                 )
             }
 

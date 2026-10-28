@@ -10,9 +10,61 @@ class ContextBuilder(
     private val memoryDao: MemoryDao,
     private val browserController: BrowserController
 ) {
-    suspend fun buildSystemContext(): AIMessage {
+    companion object {
+        /** Skills injected verbatim into every task's system context. */
+        val TASK_SKILL_PATHS = listOf(
+            "skills/browser-mastery/SKILL.md",
+            "skills/browser-cursor-control/SKILL.md",
+            "skills/keyboard-and-typing/SKILL.md",
+            "skills/phone-agent-playbook/SKILL.md"
+        )
+        const val MAX_SKILL_CHARS = 8000
+        const val MAX_SKILLS_TOTAL_CHARS = 18000
+    }
+
+    private val lessonsStore = LessonsStore(workspaceManager)
+
+    /**
+     * Reads one skill's content: the installed workspace copy wins (the
+     * user may have edited it); the bundled pack content is the fallback
+     * when the environment was never installed. Returns "" if unavailable.
+     */
+    private fun readSkill(path: String): String {
+        val installed = try {
+            workspaceManager.readFileWithLimit(path, maxBytes = 64 * 1024L)
+        } catch (e: Exception) {
+            null
+        }
+        val content = installed?.takeIf { it.isNotBlank() }
+            ?: WorkspaceManager.BUNDLED_ENVIRONMENT_FILES[path]
+            ?: return ""
+        return content.take(MAX_SKILL_CHARS)
+    }
+
+    suspend fun buildSystemContext(forTask: Boolean = false): AIMessage {
         val browserUrl = browserController.getCurrentUrl().data ?: "none"
         val browserTitle = browserController.getPageTitle().data ?: "none"
+
+        // Lessons learned from real past failures — injected so behaviour
+        // actually changes next time (see LessonsStore).
+        val lessonsText = lessonsStore.recentLessonsText()
+
+        // Browser skills, genuinely injected for task runs (not just
+        // installed on disk): mastery + cursor + keyboard + playbook.
+        val skillsText = if (forTask) {
+            val sb = StringBuilder()
+            for (path in TASK_SKILL_PATHS) {
+                if (sb.length >= MAX_SKILLS_TOTAL_CHARS) break
+                val skill = readSkill(path)
+                if (skill.isNotBlank()) {
+                    sb.append("\n----- ").append(path).append(" -----\n")
+                    sb.append(skill.trim()).append('\n')
+                }
+            }
+            if (sb.length > MAX_SKILLS_TOTAL_CHARS) sb.substring(0, MAX_SKILLS_TOTAL_CHARS) else sb.toString()
+        } else {
+            ""
+        }
 
         val memoryMd = try {
             workspaceManager.readFileWithLimit("Memory/Memory.md", maxBytes = 32 * 1024)
@@ -32,7 +84,7 @@ class ContextBuilder(
             "No prior task records."
         }
 
-        val estimatedTokens = (memoryMd.length + trainingMd.length + pastTasksSummary.length + 1500) / 4
+        val estimatedTokens = (memoryMd.length + trainingMd.length + pastTasksSummary.length + lessonsText.length + skillsText.length + 1500) / 4
 
         val prompt = """
             You are Spark Agent, an autonomous native Android assistant running inside Spark Workspace.
@@ -46,6 +98,16 @@ class ContextBuilder(
             6. In the Secret Vault, you NEVER receive or store raw passwords or API keys. To autofill forms, call the 'vault_autofill' tool with the secret_id.
             7. When creating or editing files, ensure contents are well-formatted, complete, and verified.
             8. After completing or failing a task, summarize your findings, record artifacts in `/AI-Tasks/`, and propose additions to Memory.md or Training.md if you learned new rules or user preferences.
+            ${if (lessonsText.isNotBlank()) "\nLESSONS FROM PAST FAILURES (recorded automatically from real failed tasks — apply these rules):\n$lessonsText\n" else ""}
+            ${if (skillsText.isNotBlank()) "\nBROWSER SKILLS (installed environment — follow them for all browser work):$skillsText\n" else ""}
+            HOW TO DRIVE THE BROWSER (grounded, set-of-marks method):
+            - The browser is a real WebView on this phone. You do NOT see the screen directly; you perceive pages through observations. After every navigation or page-changing action, the tool result includes a fresh "Page observation": the current URL, the page title, a numbered list of the page's interactive elements, and a text excerpt. You can also call `observe_page` at any time.
+            - Each element line looks like: [3] <input type="search" name="q"> "Search" — the number is the element's index, the tag/type say what it is, and the quoted text is its visible label, placeholder, or name.
+            - ACT BY INDEX, never by guessing: use `click_element(index)` to click and `type_text(index, text, submit)` to type. Indices belong to the page state they were observed in — after the page changes (navigation, submit, dynamic update), the old indices are invalid; use the fresh observation attached to the last tool result, or call `observe_page` again. NEVER invent an index or a CSS selector for an element you have not observed.
+            - Typing really works: `type_text` focuses the field and sets its value so real forms register it. For a search box, either type with submit=true (Enter + form submit), or navigate directly to the results URL (e.g. https://www.google.com/search?q=Pakistan).
+            - VERIFY after every action: read the new observation — check the URL, the title, the element list, and the text excerpt to confirm the action had the intended effect (e.g. after typing, the field's value shows your text; after submitting a search, the results page lists results). If the expected change did not happen, say so and change approach — never claim success you did not observe.
+            - Scroll with `scroll` to reveal more content, then observe again. Use `browser_back` / `browser_reload` / `wait_for_load` for navigation housekeeping. Use `tap(x, y)` only as a fallback for canvas or image-only areas you located in a screenshot (`take_screenshot`); when a vision model is configured, screenshots complement the element list.
+            - WORKED EXAMPLE — "search Pakistan on Google": 1) navigate to https://www.google.com. 2) In the observation, find the search box (an <input type="search"> or <textarea> named "q"). 3) type_text on its index with text "Pakistan" and submit=true — or navigate to https://www.google.com/search?q=Pakistan. 4) Verify from the new observation that the results page loaded, then finish with a summary citing the visited pages as sources.
             
             ACTIVE USER MEMORY (Memory.md):
             $memoryMd
