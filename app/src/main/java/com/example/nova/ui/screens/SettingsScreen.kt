@@ -82,8 +82,11 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.nova.ai.ApiKeySanitizer
 import com.example.nova.ai.ConnectionResult
+import com.example.nova.ai.ModelInfo
 import com.example.nova.ai.OpenAICompatibleProvider
+import com.example.nova.ai.ProviderErrors
 import com.example.nova.ai.ProviderProfile
 import com.example.nova.data.AppSettingsEntity
 import com.example.nova.data.MemoryEntryEntity
@@ -102,6 +105,46 @@ import com.example.ui.theme.WarmSuccess
 import com.example.ui.theme.WarmWarning
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+/** Derives a provider profile id from a stored provider type + base URL (used when no profile was persisted yet). */
+fun deriveProfile(providerType: String, baseUrl: String): String {
+    val host = try {
+        java.net.URI(baseUrl).host?.lowercase() ?: ""
+    } catch (e: Exception) {
+        ""
+    }
+    return when {
+        providerType == "anthropic" -> "anthropic"
+        providerType == "gemini" -> "gemini"
+        providerType == "fake" || providerType == "offline" || providerType == "mock" -> "fake"
+        host.contains("openrouter.ai") -> "openrouter"
+        host.contains("huggingface.co") -> "huggingface"
+        host.contains("api.openai.com") -> "openai_compatible"
+        baseUrl.isBlank() || baseUrl == "https://api.openai.com/v1" -> "openai_compatible"
+        else -> "custom"
+    }
+}
+
+/**
+ * Returns a warning when the selected profile family and the Base URL host
+ * belong to different API families (Anthropic vs OpenAI-compatible) — a
+ * combination that can only fail.
+ */
+fun providerMismatchWarning(providerType: String, baseUrl: String): String? {
+    val host = try {
+        java.net.URI(OpenAICompatibleProvider.normalizeBaseUrl(baseUrl)).host?.lowercase() ?: ""
+    } catch (e: Exception) {
+        ""
+    }
+    val openAiStyleHosts = setOf("openrouter.ai", "router.huggingface.co", "api.openai.com")
+    return when {
+        providerType == "anthropic" && host in openAiStyleHosts ->
+            "Anthropic Claude is selected, but the Base URL points to an OpenAI-compatible service ($host). Requests will fail — select the matching provider profile or change the Base URL."
+        providerType == "openai_compatible" && host == "api.anthropic.com" ->
+            "An OpenAI-compatible profile is selected, but the Base URL points to api.anthropic.com. Select the Anthropic Claude profile instead."
+        else -> null
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -134,9 +177,29 @@ fun SettingsScreen(
     // Fetch models state
     var isFetchingModels by remember { mutableStateOf(false) }
     var hasFetchedModels by remember { mutableStateOf(false) }
-    var fetchedModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var fetchedModels by remember { mutableStateOf<List<ModelInfo>>(emptyList()) }
     var fetchModelsError by remember { mutableStateOf<String?>(null) }
     var modelSearchQuery by remember { mutableStateOf("") }
+
+    // Provider profile (Phase 3): a named preset on top of the raw provider
+    // type. Persisted under "ai_provider_profile"; derived from the saved
+    // type/endpoint when no profile was stored yet.
+    var selectedProfile by remember { mutableStateOf("openai_compatible") }
+    var keySanitizeNote by remember { mutableStateOf<String?>(null) }
+
+    // Sanitizes the key currently in the field; shows the one-line note and
+    // persists the cleaned key when anything had to be stripped.
+    val sanitizeKeyField: () -> String = {
+        val result = ApiKeySanitizer.sanitize(apiKeyInput)
+        if (result.removedCount > 0) {
+            apiKeyInput = result.cleaned
+            keySanitizeNote = "Removed ${result.removedCount} invalid characters from the key"
+            scope.launch {
+                repository.settingsDao.setSetting(AppSettingsEntity("ai_api_key", result.cleaned))
+            }
+        }
+        result.cleaned
+    }
 
     // --- 2. MEMORY & TRAINING STATE ---
     var activeMemoryTab by remember { mutableIntStateOf(0) } // 0: Memory.md, 1: Training.md
@@ -171,6 +234,8 @@ fun SettingsScreen(
         modelNameInput = settingsList.find { it.key == "ai_model" }?.value ?: "gpt-4o-mini"
         baseUrlInput = settingsList.find { it.key == "ai_endpoint" }?.value ?: "https://api.openai.com/v1"
         isVisionModel = ProviderProfile.isVisionCapableModel(modelNameInput)
+        selectedProfile = settingsList.find { it.key == "ai_provider_profile" }?.value
+            ?: deriveProfile(selectedProviderType, baseUrlInput)
     }
 
     // Load Memory.md and Training.md from Workspace
@@ -261,39 +326,51 @@ fun SettingsScreen(
                         ) {
                             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                 Text(
-                                    text = "Provider Type",
+                                    text = "Provider Profile",
                                     style = MaterialTheme.typography.labelSmall.copy(color = StoneMuted, fontWeight = FontWeight.Bold)
                                 )
 
-                                // Provider selector pills
-                                val providers = listOf(
-                                    "openai_compatible" to "OpenAI-Compatible",
-                                    "gemini" to "Google Gemini",
-                                    "anthropic" to "Anthropic Claude",
-                                    "fake" to "Offline Autonomous"
+                                // Provider profile selector (Phase 3): each profile maps to a
+                                // provider type and auto-fills its Base URL on selection.
+                                // "Custom" keeps the Base URL freely editable below.
+                                val profiles = listOf(
+                                    Triple("openrouter", "OpenRouter", "openai_compatible"),
+                                    Triple("huggingface", "Hugging Face", "openai_compatible"),
+                                    Triple("openai_compatible", "OpenAI-Compatible", "openai_compatible"),
+                                    Triple("anthropic", "Anthropic Claude", "anthropic"),
+                                    Triple("gemini", "Google Gemini", "gemini"),
+                                    Triple("custom", "Custom", "openai_compatible"),
+                                    Triple("fake", "Offline Demo", "fake")
                                 )
 
                                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    items(providers) { (type, name) ->
-                                        val isSel = selectedProviderType == type
+                                    items(profiles) { (profileId, name, type) ->
+                                        val isSel = selectedProfile == profileId
                                         Surface(
                                             shape = RoundedCornerShape(18.dp),
                                             color = if (isSel) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
                                             border = BorderStroke(1.dp, if (isSel) MaterialTheme.colorScheme.primary else Color.Transparent),
                                             modifier = Modifier.clickable {
+                                                selectedProfile = profileId
                                                 selectedProviderType = type
-                                                if (type == "openai_compatible") {
-                                                    baseUrlInput = "https://api.openai.com/v1"
-                                                    modelNameInput = "gpt-4o-mini"
-                                                } else if (type == "gemini") {
-                                                    modelNameInput = "gemini-2.5-flash"
+                                                when (profileId) {
+                                                    "openrouter" -> baseUrlInput = "https://openrouter.ai/api/v1"
+                                                    "huggingface" -> baseUrlInput = "https://router.huggingface.co/v1"
+                                                    "openai_compatible" -> {
+                                                        baseUrlInput = "https://api.openai.com/v1"
+                                                        modelNameInput = "gpt-4o-mini"
+                                                    }
+                                                    "gemini" -> modelNameInput = "gemini-2.5-flash"
+                                                    // "custom": keep current Base URL (free edit)
+                                                    // "anthropic" / "fake": Base URL not used by the adapter
                                                 }
                                                 scope.launch {
+                                                    repository.settingsDao.setSetting(AppSettingsEntity("ai_provider_profile", profileId))
                                                     repository.settingsDao.setSetting(AppSettingsEntity("ai_provider_type", type))
                                                     repository.settingsDao.setSetting(AppSettingsEntity("ai_model", modelNameInput))
                                                     repository.settingsDao.setSetting(AppSettingsEntity("ai_endpoint", baseUrlInput))
                                                 }
-                                            }
+                                            }.testTag("provider_profile_$profileId")
                                         ) {
                                             Text(
                                                 text = name,
@@ -324,13 +401,38 @@ fun SettingsScreen(
                                     modifier = Modifier.fillMaxWidth().testTag("settings_base_url_input")
                                 )
 
-                                // API Key Input
+                                // Profile/endpoint family mismatch warning
+                                val mismatchWarning = providerMismatchWarning(selectedProviderType, baseUrlInput)
+                                if (mismatchWarning != null) {
+                                    Surface(
+                                        color = WarmWarning.copy(alpha = 0.12f),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.fillMaxWidth().testTag("provider_mismatch_warning")
+                                    ) {
+                                        Text(
+                                            text = "⚠️ $mismatchWarning",
+                                            color = WarmWarning,
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.padding(10.dp)
+                                        )
+                                    }
+                                }
+
+                                // API Key Input (sanitized on change: invisible and
+                                // non-ASCII characters from a paste are stripped so
+                                // they can never break the Authorization header)
                                 OutlinedTextField(
                                     value = apiKeyInput,
-                                    onValueChange = {
-                                        apiKeyInput = it
+                                    onValueChange = { raw ->
+                                        val result = ApiKeySanitizer.sanitize(raw)
+                                        apiKeyInput = result.cleaned
+                                        keySanitizeNote = if (result.removedCount > 0) {
+                                            "Removed ${result.removedCount} invalid characters from the key"
+                                        } else {
+                                            null
+                                        }
                                         scope.launch {
-                                            repository.settingsDao.setSetting(AppSettingsEntity("ai_api_key", it.trim()))
+                                            repository.settingsDao.setSetting(AppSettingsEntity("ai_api_key", result.cleaned))
                                         }
                                     },
                                     label = { Text("API Key") },
@@ -349,6 +451,15 @@ fun SettingsScreen(
                                     modifier = Modifier.fillMaxWidth().testTag("api_key_input")
                                 )
 
+                                if (keySanitizeNote != null) {
+                                    Text(
+                                        text = keySanitizeNote!!,
+                                        color = WarmWarning,
+                                        fontSize = 11.sp,
+                                        modifier = Modifier.testTag("api_key_sanitize_note")
+                                    )
+                                }
+
                                 // Fetch Models Action Row
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -360,14 +471,15 @@ fun SettingsScreen(
                                             isFetchingModels = true
                                             fetchModelsError = null
                                             hasFetchedModels = false
+                                            val cleanKey = sanitizeKeyField()
                                             scope.launch {
                                                 try {
-                                                    val models = OpenAICompatibleProvider.fetchModels(baseUrlInput, apiKeyInput)
+                                                    val models = OpenAICompatibleProvider.fetchModels(baseUrlInput, cleanKey)
                                                     fetchedModels = models
                                                     hasFetchedModels = true
                                                     Toast.makeText(context, "Loaded ${models.size} models", Toast.LENGTH_SHORT).show()
                                                 } catch (e: Exception) {
-                                                    fetchModelsError = e.message
+                                                    fetchModelsError = ProviderErrors.userMessage(e)
                                                 } finally {
                                                     isFetchingModels = false
                                                 }
@@ -417,35 +529,60 @@ fun SettingsScreen(
                                     }
                                 }
 
-                                // Fetched Models Chips
+                                // Fetched Models — selectable list (tap sets the Active
+                                // Model). The FREE tag appears only when the provider's
+                                // own data marks the model free (see ModelInfo).
                                 if (fetchedModels.isNotEmpty()) {
                                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         Text("Select active model:", style = MaterialTheme.typography.labelSmall.copy(color = StoneMuted))
-                                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        LazyColumn(
+                                            modifier = Modifier.fillMaxWidth().height(240.dp),
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
                                             items(fetchedModels) { m ->
-                                                val isSel = m == modelNameInput
+                                                val isSel = m.id == modelNameInput
                                                 Surface(
-                                                    shape = RoundedCornerShape(14.dp),
+                                                    shape = RoundedCornerShape(10.dp),
                                                     color = if (isSel) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
                                                     border = BorderStroke(1.dp, if (isSel) MaterialTheme.colorScheme.primary else Color.Transparent),
-                                                    modifier = Modifier.clickable {
-                                                        modelNameInput = m
-                                                        isVisionModel = ProviderProfile.isVisionCapableModel(m)
+                                                    modifier = Modifier.fillMaxWidth().clickable {
+                                                        modelNameInput = m.id
+                                                        isVisionModel = ProviderProfile.isVisionCapableModel(m.id)
                                                         scope.launch {
-                                                            repository.settingsDao.setSetting(AppSettingsEntity("ai_model", m))
-                                                            Toast.makeText(context, "Active: $m", Toast.LENGTH_SHORT).show()
+                                                            repository.settingsDao.setSetting(AppSettingsEntity("ai_model", m.id))
+                                                            Toast.makeText(context, "Active: ${m.id}", Toast.LENGTH_SHORT).show()
                                                         }
-                                                    }.testTag("model_chip_$m")
+                                                    }.testTag("model_chip_${m.id}")
                                                 ) {
                                                     Row(
-                                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
                                                         verticalAlignment = Alignment.CenterVertically
                                                     ) {
                                                         if (isSel) {
                                                             Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
                                                             Spacer(modifier = Modifier.width(4.dp))
                                                         }
-                                                        Text(m, fontSize = 12.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal)
+                                                        Text(
+                                                            m.id,
+                                                            fontSize = 12.sp,
+                                                            fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                                            modifier = Modifier.weight(1f)
+                                                        )
+                                                        if (m.isFree) {
+                                                            Surface(
+                                                                shape = RoundedCornerShape(6.dp),
+                                                                color = WarmSuccess.copy(alpha = 0.15f),
+                                                                border = BorderStroke(0.5.dp, WarmSuccess.copy(alpha = 0.5f))
+                                                            ) {
+                                                                Text(
+                                                                    "FREE",
+                                                                    fontSize = 9.sp,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    color = WarmSuccess,
+                                                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                                                )
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -491,6 +628,7 @@ fun SettingsScreen(
                                     onClick = {
                                         isTestingConnection = true
                                         testResult = null
+                                        sanitizeKeyField()
                                         scope.launch {
                                             val p = repository.getActiveProvider()
                                             testResult = p.testConnection()

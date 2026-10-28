@@ -30,7 +30,7 @@ class GeminiProvider(
         .build()
 
     fun getEffectiveApiKey(): String {
-        val userKey = customApiKey?.trim().orEmpty()
+        val userKey = ApiKeySanitizer.sanitize(customApiKey).cleaned
         if (userKey.isNotBlank()) return userKey
         return try {
             val field = BuildConfig::class.java.getField("GEMINI_API_KEY")
@@ -87,7 +87,7 @@ class GeminiProvider(
                 }
             }
         } catch (e: Exception) {
-            ConnectionResult(false, 0, "Connection error: ${e.message}")
+            ConnectionResult(false, 0, "Connection error: ${ProviderErrors.userMessage(e)}")
         }
     }
 

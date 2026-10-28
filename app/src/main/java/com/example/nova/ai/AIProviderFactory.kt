@@ -9,7 +9,10 @@ class AIProviderFactory {
             endpoint: String?,
             timeoutSeconds: Long = 60
         ): AIProviderAdapter {
-            val key = apiKey?.trim().orEmpty()
+            // Central sanitization: every provider built here receives a key
+            // free of invisible/non-ASCII characters, so no request header can
+            // ever trip OkHttp's raw validation exception.
+            val key = ApiKeySanitizer.sanitize(apiKey).cleaned
             return when (providerType.lowercase()) {
                 "gemini" -> {
                     val model = if (!modelName.isNullOrBlank()) modelName else "gemini-2.5-flash"

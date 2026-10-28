@@ -14,10 +14,13 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class AnthropicProvider(
-    private val apiKey: String,
+    apiKey: String,
     private val model: String = "claude-3-5-sonnet-20241022",
     private val timeoutSeconds: Long = 60
 ) : AIProviderAdapter {
+    // Sanitized at construction so an unsafe pasted key can never make OkHttp
+    // throw its raw header-validation exception (see ApiKeySanitizer).
+    private val apiKey: String = ApiKeySanitizer.sanitize(apiKey).cleaned
     override val providerId: String = "anthropic"
     override val displayName: String = "Anthropic Claude ($model)"
 
@@ -50,15 +53,15 @@ class AnthropicProvider(
             })
         }
 
-        val request = Request.Builder()
-            .url("https://api.anthropic.com/v1/messages")
-            .addHeader("x-api-key", apiKey)
-            .addHeader("anthropic-version", "2023-06-01")
-            .addHeader("content-type", "application/json")
-            .post(payload.toString().toRequestBody("application/json".toMediaType()))
-            .build()
-
         try {
+            val request = Request.Builder()
+                .url("https://api.anthropic.com/v1/messages")
+                .addHeader("x-api-key", apiKey)
+                .addHeader("anthropic-version", "2023-06-01")
+                .addHeader("content-type", "application/json")
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+
             client.newCall(request).execute().use { response ->
                 val latency = System.currentTimeMillis() - startTime
                 if (response.isSuccessful) {
@@ -69,7 +72,7 @@ class AnthropicProvider(
                 }
             }
         } catch (e: Exception) {
-            ConnectionResult(false, 0, "Anthropic connection failed: ${e.message}")
+            ConnectionResult(false, 0, "Anthropic connection failed: ${ProviderErrors.userMessage(e)}")
         }
     }
 
@@ -123,7 +126,12 @@ class AnthropicProvider(
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
-        client.newCall(request).execute().use { response ->
+        val rawResponse = try {
+            client.newCall(request).execute()
+        } catch (e: IllegalArgumentException) {
+            throw IllegalStateException(ProviderErrors.userMessage(e))
+        }
+        rawResponse.use { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 throw IllegalStateException("Anthropic Error (${response.code}): $body")

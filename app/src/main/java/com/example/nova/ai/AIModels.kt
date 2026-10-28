@@ -45,6 +45,20 @@ data class ProviderValidationResult(
     val errorMessage: String? = null
 )
 
+/**
+ * A model offered by a provider's /models endpoint.
+ *
+ * [isFree] is derived ONLY from data the provider itself returns (see
+ * OpenAICompatibleProvider.parseModelsJson): an id ending in ":free"
+ * (OpenRouter convention) or an explicit pricing object whose prompt AND
+ * completion prices are both zero. Providers that return no free signal
+ * (e.g. Hugging Face's /models) always yield isFree = false — never guessed.
+ */
+data class ModelInfo(
+    val id: String,
+    val isFree: Boolean = false
+)
+
 data class ConnectionResult(
     val isSuccess: Boolean,
     val latencyMs: Long = 0,

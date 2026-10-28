@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
@@ -70,6 +71,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.nova.ai.ModelInfo
+import com.example.nova.ai.OpenAICompatibleProvider
+import com.example.nova.ai.ProviderErrors
+import com.example.nova.data.AppSettingsEntity
 import com.example.nova.data.ChatMessageEntity
 import com.example.nova.data.ConversationEntity
 import com.example.nova.data.NovaRepository
@@ -107,6 +112,18 @@ fun ChatScreen(
     val conversations by repository.conversations.collectAsState(initial = emptyList())
     val activeTasks by repository.tasks.collectAsState(initial = emptyList())
     val presence by repository.pipelinePresence.collectAsState()
+
+    // Active model chip state (Phase 3)
+    val settingsList by repository.settings.collectAsState(initial = emptyList())
+    val activeModel = settingsList.find { it.key == "ai_model" }?.value ?: "gpt-4o-mini"
+    val activeProviderType = settingsList.find { it.key == "ai_provider_type" }?.value ?: "openai_compatible"
+    val activeEndpoint = settingsList.find { it.key == "ai_endpoint" }?.value ?: "https://api.openai.com/v1"
+    val activeApiKey = settingsList.find { it.key == "ai_api_key" }?.value ?: ""
+    var showModelDialog by remember { mutableStateOf(false) }
+    var chatFetchedModels by remember { mutableStateOf<List<ModelInfo>>(emptyList()) }
+    var isFetchingChatModels by remember { mutableStateOf(false) }
+    var chatModelFetchError by remember { mutableStateOf<String?>(null) }
+    var manualModelInput by remember { mutableStateOf("") }
 
     var activeConversationId by remember { mutableStateOf<String?>(null) }
     var inputText by remember { mutableStateOf("") }
@@ -426,6 +443,41 @@ fun ChatScreen(
                 }
             }
 
+            // Active model chip — tap to switch models
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.Start
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier
+                        .clickable {
+                            manualModelInput = activeModel
+                            showModelDialog = true
+                        }
+                        .testTag("model_chip")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Psychology, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = activeModel,
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface),
+                            maxLines = 1
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Icon(Icons.Default.ExpandMore, contentDescription = "Switch model", tint = StoneMuted, modifier = Modifier.size(14.dp))
+                    }
+                }
+            }
+
             // Pill-shaped chat input bar
             Box(
                 modifier = Modifier
@@ -686,6 +738,124 @@ fun ChatScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showRenameDialog = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // Switch Model Dialog (from the model chip)
+    if (showModelDialog) {
+        AlertDialog(
+            onDismissRequest = { showModelDialog = false },
+            title = { Text("Switch Model") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Active model: $activeModel",
+                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                    )
+                    if (activeProviderType == "openai_compatible") {
+                        Button(
+                            onClick = {
+                                isFetchingChatModels = true
+                                chatModelFetchError = null
+                                scope.launch {
+                                    try {
+                                        chatFetchedModels = OpenAICompatibleProvider.fetchModels(activeEndpoint, activeApiKey)
+                                    } catch (e: Exception) {
+                                        chatModelFetchError = ProviderErrors.userMessage(e)
+                                    } finally {
+                                        isFetchingChatModels = false
+                                    }
+                                }
+                            },
+                            enabled = !isFetchingChatModels,
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier.testTag("chat_fetch_models_button")
+                        ) {
+                            Text(if (isFetchingChatModels) "Fetching..." else "Fetch models", fontSize = 12.sp)
+                        }
+                        if (chatModelFetchError != null) {
+                            Text("Error: $chatModelFetchError", color = WarmError, fontSize = 11.sp)
+                        }
+                        if (chatFetchedModels.isNotEmpty()) {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxWidth().height(220.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                items(chatFetchedModels) { m ->
+                                    val isSel = m.id == activeModel
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (isSel) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                        modifier = Modifier.fillMaxWidth().clickable {
+                                            scope.launch {
+                                                repository.settingsDao.setSetting(AppSettingsEntity("ai_model", m.id))
+                                            }
+                                            showModelDialog = false
+                                            Toast.makeText(context, "Active: ${m.id}", Toast.LENGTH_SHORT).show()
+                                        }.testTag("chat_model_item_${m.id}")
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                m.id,
+                                                fontSize = 12.sp,
+                                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            if (m.isFree) {
+                                                Surface(
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = WarmSuccess.copy(alpha = 0.15f),
+                                                    border = androidx.compose.foundation.BorderStroke(0.5.dp, WarmSuccess.copy(alpha = 0.5f))
+                                                ) {
+                                                    Text(
+                                                        "FREE",
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = WarmSuccess,
+                                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        Text(
+                            text = "Model lists can be fetched for OpenAI-compatible profiles (OpenRouter, Hugging Face, Custom). For this provider, type the model name below or change it in Settings → AI Engine.",
+                            style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted)
+                        )
+                    }
+                    OutlinedTextField(
+                        value = manualModelInput,
+                        onValueChange = { manualModelInput = it },
+                        label = { Text("Model name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("chat_manual_model_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val chosen = manualModelInput.trim()
+                        if (chosen.isNotBlank()) {
+                            scope.launch {
+                                repository.settingsDao.setSetting(AppSettingsEntity("ai_model", chosen))
+                            }
+                            Toast.makeText(context, "Active: $chosen", Toast.LENGTH_SHORT).show()
+                        }
+                        showModelDialog = false
+                    }
+                ) { Text("Set model") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showModelDialog = false }) { Text("Close") }
             }
         )
     }

@@ -14,11 +14,16 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class OpenAICompatibleProvider(
-    private val apiKey: String,
+    apiKey: String,
     private val model: String = "gpt-4o-mini",
     endpointOrBaseUrl: String = "https://api.openai.com/v1",
     private val timeoutSeconds: Long = 60
 ) : AIProviderAdapter {
+    // The key is sanitized at construction so a pasted key carrying invisible
+    // or non-ASCII characters can never make OkHttp throw its raw
+    // "Unexpected char ... in Authorization value" exception.
+    private val keySanitization = ApiKeySanitizer.sanitize(apiKey)
+    private val apiKey: String = keySanitization.cleaned
     override val providerId: String = "openai_compatible"
     override val displayName: String = "OpenAI / Compatible ($model)"
 
@@ -44,7 +49,7 @@ class OpenAICompatibleProvider(
             return clean
         }
 
-        suspend fun fetchModels(baseUrl: String, apiKey: String, timeoutSeconds: Long = 15): List<String> = withContext(Dispatchers.IO) {
+        suspend fun fetchModels(baseUrl: String, apiKey: String, timeoutSeconds: Long = 15): List<ModelInfo> = withContext(Dispatchers.IO) {
             val cleanBase = normalizeBaseUrl(baseUrl)
             val modelsUrl = "$cleanBase/models"
             val client = OkHttpClient.Builder()
@@ -52,57 +57,96 @@ class OpenAICompatibleProvider(
                 .readTimeout(timeoutSeconds, TimeUnit.SECONDS)
                 .build()
 
-            val reqBuilder = Request.Builder().url(modelsUrl)
-            if (apiKey.isNotBlank()) {
-                reqBuilder.addHeader("Authorization", "Bearer ${apiKey.trim()}")
+            // Sanitize before the key ever touches a header: a pasted key with
+            // invisible/non-ASCII characters must produce the friendly
+            // invalid-key message, never OkHttp's raw exception text.
+            val cleanKey = ApiKeySanitizer.sanitize(apiKey).cleaned
+            val request = try {
+                val reqBuilder = Request.Builder().url(modelsUrl)
+                if (cleanKey.isNotBlank()) {
+                    reqBuilder.addHeader("Authorization", "Bearer $cleanKey")
+                }
+                reqBuilder.build()
+            } catch (e: IllegalArgumentException) {
+                throw IllegalStateException(ProviderErrors.userMessage(e))
             }
 
-            client.newCall(reqBuilder.build()).execute().use { response ->
+            client.newCall(request).execute().use { response ->
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     throw IllegalStateException("HTTP ${response.code}: $body")
                 }
+                parseModelsJson(body)
+            }
+        }
 
-                val modelList = mutableListOf<String>()
-                try {
-                    val root = JSONObject(body)
-                    val dataArr = root.optJSONArray("data") ?: root.optJSONArray("models")
-                    if (dataArr != null) {
-                        for (i in 0 until dataArr.length()) {
-                            val item = dataArr.get(i)
-                            if (item is JSONObject) {
-                                val id = item.optString("id").ifBlank { item.optString("name") }
-                                if (id.isNotBlank()) modelList.add(id)
-                            } else if (item is String && item.isNotBlank()) {
-                                modelList.add(item)
-                            }
+        /**
+         * Parses a /models response body into [ModelInfo] entries.
+         * The free flag comes only from the payload itself: an id ending in
+         * ":free", or a `pricing` object whose prompt AND completion prices
+         * are both zero (OpenRouter returns string prices like "0").
+         * Payloads without pricing data (e.g. Hugging Face) never get the tag.
+         */
+        fun parseModelsJson(body: String): List<ModelInfo> {
+            val result = mutableListOf<ModelInfo>()
+
+            fun addItem(item: Any?) {
+                when (item) {
+                    is JSONObject -> {
+                        val id = item.optString("id").ifBlank { item.optString("name") }
+                        if (id.isNotBlank()) {
+                            result.add(ModelInfo(id = id, isFree = isFreeModel(item, id)))
                         }
                     }
-                } catch (e: Exception) {
-                    // Try parsing as array directly
-                    try {
-                        val arr = JSONArray(body)
-                        for (i in 0 until arr.length()) {
-                            val item = arr.get(i)
-                            if (item is JSONObject) {
-                                val id = item.optString("id").ifBlank { item.optString("name") }
-                                if (id.isNotBlank()) modelList.add(id)
-                            } else if (item is String && item.isNotBlank()) {
-                                modelList.add(item)
-                            }
+                    is String -> {
+                        if (item.isNotBlank()) {
+                            result.add(ModelInfo(id = item, isFree = item.endsWith(":free")))
                         }
-                    } catch (e2: Exception) {
-                        throw IllegalStateException("Failed to parse models JSON: ${e.message}")
                     }
                 }
-
-                modelList.distinct().sorted()
             }
+
+            try {
+                val root = JSONObject(body)
+                val dataArr = root.optJSONArray("data") ?: root.optJSONArray("models")
+                if (dataArr != null) {
+                    for (i in 0 until dataArr.length()) {
+                        addItem(dataArr.get(i))
+                    }
+                }
+            } catch (e: Exception) {
+                // Try parsing as a bare JSON array
+                try {
+                    val arr = JSONArray(body)
+                    for (i in 0 until arr.length()) {
+                        addItem(arr.get(i))
+                    }
+                } catch (e2: Exception) {
+                    throw IllegalStateException("Failed to parse models JSON: ${ProviderErrors.userMessage(e)}")
+                }
+            }
+
+            return result.distinctBy { it.id }.sortedBy { it.id }
+        }
+
+        private fun isFreeModel(item: JSONObject, id: String): Boolean {
+            if (id.endsWith(":free")) return true
+            val pricing = item.optJSONObject("pricing") ?: return false
+            fun isZero(value: Any?): Boolean {
+                if (value == null) return false
+                val s = value.toString().trim()
+                if (s == "0") return true
+                return s.toDoubleOrNull() == 0.0
+            }
+            return isZero(pricing.opt("prompt")) && isZero(pricing.opt("completion"))
         }
     }
 
     override fun validateConfiguration(): ProviderValidationResult {
-        return if (apiKey.isBlank()) {
+        return if (apiKey.isBlank() && keySanitization.removedCount > 0) {
+            // The pasted key consisted only of characters that had to be stripped.
+            ProviderValidationResult(false, ApiKeySanitizer.INVALID_KEY_MESSAGE)
+        } else if (apiKey.isBlank()) {
             ProviderValidationResult(false, "API key is required.")
         } else if (baseUrl.isBlank() || !baseUrl.startsWith("http")) {
             ProviderValidationResult(false, "Valid HTTP(S) Base URL is required.")
@@ -127,14 +171,13 @@ class OpenAICompatibleProvider(
             put("max_tokens", 5)
         }
 
-        val request = Request.Builder()
-            .url(endpoint)
-            .addHeader("Authorization", "Bearer $apiKey")
-            .addHeader("Content-Type", "application/json")
-            .post(payload.toString().toRequestBody("application/json".toMediaType()))
-            .build()
-
         try {
+            val request = Request.Builder()
+                .url(endpoint)
+                .addHeader("Authorization", "Bearer $apiKey")
+                .addHeader("Content-Type", "application/json")
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                .build()
             client.newCall(request).execute().use { response ->
                 val latency = System.currentTimeMillis() - startTime
                 if (response.isSuccessful) {
@@ -145,7 +188,7 @@ class OpenAICompatibleProvider(
                 }
             }
         } catch (e: Exception) {
-            ConnectionResult(false, 0, "Connection failed: ${e.message}")
+            ConnectionResult(false, 0, "Connection failed: ${ProviderErrors.userMessage(e)}")
         }
     }
 
@@ -208,7 +251,13 @@ class OpenAICompatibleProvider(
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
-        client.newCall(request).execute().use { response ->
+        val rawResponse = try {
+            client.newCall(request).execute()
+        } catch (e: IllegalArgumentException) {
+            // Header validation failures must never leak OkHttp's raw text.
+            throw IllegalStateException(ProviderErrors.userMessage(e))
+        }
+        rawResponse.use { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 throw IllegalStateException("API Error (${response.code}): $body")
