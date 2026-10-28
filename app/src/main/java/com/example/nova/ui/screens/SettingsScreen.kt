@@ -133,7 +133,18 @@ fun SettingsScreen(
     var isFetchingModels by remember { mutableStateOf(false) }
     var fetchedModels by remember { mutableStateOf<List<String>>(emptyList()) }
     var fetchModelsError by remember { mutableStateOf<String?>(null) }
+    var fetchModelsInfo by remember { mutableStateOf<String?>(null) }
     var modelSearchQuery by remember { mutableStateOf("") }
+    val modelFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+    var requestModelFocus by remember { mutableStateOf(false) }
+
+    // When the provider returns 0 models, guide the user to the manual field.
+    LaunchedEffect(requestModelFocus) {
+        if (requestModelFocus) {
+            try { modelFocusRequester.requestFocus() } catch (e: Exception) { }
+            requestModelFocus = false
+        }
+    }
 
     // --- 2. MEMORY & TRAINING STATE ---
     var activeMemoryTab by remember { mutableIntStateOf(0) } // 0: Memory.md, 1: Training.md
@@ -347,11 +358,35 @@ fun SettingsScreen(
                                         onClick = {
                                             isFetchingModels = true
                                             fetchModelsError = null
+                                            fetchModelsInfo = null
                                             scope.launch {
                                                 try {
-                                                    val models = OpenAICompatibleProvider.fetchModels(baseUrlInput, apiKeyInput)
-                                                    fetchedModels = models
-                                                    Toast.makeText(context, "Loaded ${models.size} models", Toast.LENGTH_SHORT).show()
+                                                    when (val result = OpenAICompatibleProvider.fetchModelsDetailed(baseUrlInput, apiKeyInput)) {
+                                                        is com.example.nova.ai.FetchModelsResult.Success -> {
+                                                            fetchedModels = result.models
+                                                            Toast.makeText(context, "Loaded ${result.models.size} models", Toast.LENGTH_SHORT).show()
+                                                        }
+                                                        is com.example.nova.ai.FetchModelsResult.Empty -> {
+                                                            // HTTP 200 with an empty list is NOT an error:
+                                                            // the provider/plan simply exposes no models.
+                                                            fetchedModels = emptyList()
+                                                            fetchModelsInfo = "Provider returned 0 models. You can type a model name manually below."
+                                                            requestModelFocus = true
+                                                        }
+                                                        is com.example.nova.ai.FetchModelsResult.HttpError -> {
+                                                            fetchedModels = emptyList()
+                                                            fetchModelsError = "HTTP ${result.code}: ${result.reason}"
+                                                        }
+                                                        is com.example.nova.ai.FetchModelsResult.Malformed -> {
+                                                            fetchedModels = emptyList()
+                                                            fetchModelsError = "Could not read the models list — the response was not valid JSON. You can type a model name manually below."
+                                                            requestModelFocus = true
+                                                        }
+                                                        is com.example.nova.ai.FetchModelsResult.NetworkError -> {
+                                                            fetchedModels = emptyList()
+                                                            fetchModelsError = result.message
+                                                        }
+                                                    }
                                                 } catch (e: Exception) {
                                                     fetchModelsError = e.message
                                                 } finally {
@@ -386,6 +421,16 @@ fun SettingsScreen(
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Text("Error: $fetchModelsError", color = WarmError, fontSize = 12.sp, modifier = Modifier.padding(8.dp))
+                                    }
+                                }
+
+                                if (fetchModelsInfo != null) {
+                                    Surface(
+                                        color = WarmWarning.copy(alpha = 0.12f),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.fillMaxWidth().testTag("fetch_models_info")
+                                    ) {
+                                        Text(fetchModelsInfo!!, color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp, modifier = Modifier.padding(8.dp))
                                     }
                                 }
 
@@ -435,10 +480,12 @@ fun SettingsScreen(
                                             repository.settingsDao.setSetting(AppSettingsEntity("ai_model", it))
                                         }
                                     },
-                                    label = { Text("Active Model") },
+                                    label = { Text("Active Model (type manually or pick from fetched list)") },
                                     singleLine = true,
                                     shape = RoundedCornerShape(12.dp),
-                                    modifier = Modifier.fillMaxWidth().testTag("model_name_input_field")
+                                    modifier = Modifier.fillMaxWidth()
+                                        .androidx.compose.ui.focus.focusRequester(modelFocusRequester)
+                                        .testTag("model_name_input_field")
                                 )
 
                                 // Vision Capability Switch
