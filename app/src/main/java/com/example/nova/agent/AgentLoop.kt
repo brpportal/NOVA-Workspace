@@ -18,6 +18,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -69,6 +70,12 @@ class AgentLoop(
         messages.add(contextBuilder.buildSystemContext())
         messages.add(AIMessage(role = "user", content = task.prompt))
 
+        // Chat gets ONE concise status line per task run — step-by-step
+        // narration belongs in the task detail/log, not as chat bubbles.
+        if (conversationId != null) {
+            postToChatOnce(conversationId, "system", "🛠 Working on it — follow progress in the **Tasks** tab.")
+        }
+
         var stepNumber = 1
         var duplicateCount = 0
         var lastToolCallSignature = ""
@@ -99,21 +106,12 @@ class AgentLoop(
 
                 val response = provider.sendMessage(messages, toolRegistry.availableTools)
 
-                // If response has assistant text
+                // Assistant text stays in the agent's own message chain. It is
+                // NOT mirrored into chat per step (that produced repeated
+                // narration bubbles); only the final answer is posted, once.
                 val assistantText = response.text.orEmpty()
                 if (assistantText.isNotBlank()) {
                     messages.add(AIMessage(role = "assistant", content = assistantText))
-                    if (conversationId != null) {
-                        chatDao.insertMessage(
-                            ChatMessageEntity(
-                                id = UUID.randomUUID().toString(),
-                                conversationId = conversationId,
-                                sender = "assistant",
-                                content = assistantText,
-                                timestamp = System.currentTimeMillis()
-                            )
-                        )
-                    }
                 }
 
                 // If no tool calls requested, the agent completed the task!
@@ -126,6 +124,9 @@ class AgentLoop(
                         updatedAt = System.currentTimeMillis()
                     )
                     taskDao.updateTask(currentTask)
+                    if (conversationId != null && assistantText.isNotBlank()) {
+                        postToChatOnce(conversationId, "assistant", assistantText)
+                    }
                     break
                 }
 
@@ -282,6 +283,31 @@ class AgentLoop(
                 )
             } catch (ignored: Exception) {}
             activeJobs.remove(taskId)
+        }
+    }
+
+    /**
+     * Posts a message to the conversation, skipping it when the immediately
+     * preceding non-user message already has identical content (prevents the
+     * duplicate-bubble problem, e.g. the same status line on task resume).
+     */
+    private suspend fun postToChatOnce(conversationId: String, sender: String, content: String) {
+        try {
+            val last = chatDao.getMessagesForConversation(conversationId)
+                .firstOrNull()
+                ?.lastOrNull { it.sender != "user" }
+            if (last != null && last.content == content) return
+            chatDao.insertMessage(
+                ChatMessageEntity(
+                    id = UUID.randomUUID().toString(),
+                    conversationId = conversationId,
+                    sender = sender,
+                    content = content,
+                    timestamp = System.currentTimeMillis()
+                )
+            )
+        } catch (e: Exception) {
+            // Chat mirroring must never fail the task itself.
         }
     }
 

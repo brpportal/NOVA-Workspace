@@ -421,7 +421,7 @@ fun ChatScreen(
                             )
                         )
 
-                        val canSend = inputText.isNotBlank() && runningTask == null
+                        val canSend = inputText.isNotBlank()
                         IconButton(
                             onClick = {
                                 if (canSend) {
@@ -444,17 +444,49 @@ fun ChatScreen(
                                             )
                                         )
 
-                                        // Launch agent task
                                         val promptWithContext = if (attached.isNotEmpty()) {
                                             "$text\n\n[Attached workspace files: ${attached.joinToString(", ")}]"
                                         } else {
                                             text
                                         }
-                                        repository.launchTask(
-                                            prompt = promptWithContext,
-                                            title = text.take(30),
-                                            conversationId = convId
-                                        )
+
+                                        // Routing rule (see ChatIntent): plain conversation is
+                                        // answered by the configured provider and NEVER creates
+                                        // a task; only clear action requests launch the agent.
+                                        if (com.example.nova.agent.ChatIntent.isActionRequest(text)) {
+                                            val unavailable = repository.providerUnavailableReason()
+                                            when {
+                                                unavailable != null -> {
+                                                    repository.chatDao.insertMessage(
+                                                        ChatMessageEntity(
+                                                            id = UUID.randomUUID().toString(),
+                                                            conversationId = convId,
+                                                            sender = "system",
+                                                            content = "⚠️ **System notice — not an AI reply.** Agent tasks need a working AI provider. $unavailable Add your Base URL and API key in **Settings → AI Engine**.",
+                                                            timestamp = System.currentTimeMillis()
+                                                        )
+                                                    )
+                                                }
+                                                runningTask != null -> {
+                                                    repository.chatDao.insertMessage(
+                                                        ChatMessageEntity(
+                                                            id = UUID.randomUUID().toString(),
+                                                            conversationId = convId,
+                                                            sender = "system",
+                                                            content = "⚠️ An agent task is already running — follow it in the **Tasks** tab, or stop it before starting another.",
+                                                            timestamp = System.currentTimeMillis()
+                                                        )
+                                                    )
+                                                }
+                                                else -> repository.launchTask(
+                                                    prompt = promptWithContext,
+                                                    title = text.take(30),
+                                                    conversationId = convId
+                                                )
+                                            }
+                                        } else {
+                                            repository.sendChatReply(convId)
+                                        }
                                     }
                                 }
                             },

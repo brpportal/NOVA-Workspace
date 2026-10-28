@@ -5,8 +5,10 @@ import com.example.nova.agent.AgentLoop
 import com.example.nova.agent.ContextBuilder
 import com.example.nova.agent.ToolExecutor
 import com.example.nova.agent.ToolRegistry
+import com.example.nova.ai.AIMessage
 import com.example.nova.ai.AIProviderAdapter
 import com.example.nova.ai.AIProviderFactory
+import com.example.nova.ai.FakeAIProvider
 import com.example.nova.browser.BrowserController
 import com.example.nova.security.PermissionManager
 import com.example.nova.security.VaultManager
@@ -64,6 +66,87 @@ class NovaRepository(
         val model = settingsDao.getSetting("ai_model")
         val endpoint = settingsDao.getSetting("ai_endpoint")
         return AIProviderFactory.createProvider(providerType, apiKey, model, endpoint)
+    }
+
+    /**
+     * Returns null when a REAL provider is configured and valid, otherwise a
+     * short human-readable reason. The offline FakeAIProvider does not count
+     * as "configured": its scripted replies must never be presented to the
+     * user as if a real model answered (see FIX notes in ChatScreen).
+     */
+    suspend fun providerUnavailableReason(): String? {
+        val provider = getActiveProvider()
+        if (provider is FakeAIProvider) {
+            val type = settingsDao.getSetting("ai_provider_type")?.lowercase()
+            return if (type == "fake" || type == "offline" || type == "mock") {
+                "Offline demo mode is selected — it does not run a real AI model and its scripted replies are not shown as answers."
+            } else {
+                "No AI provider is configured yet."
+            }
+        }
+        val validation = provider.validateConfiguration()
+        return if (validation.isValid) null else (validation.errorMessage ?: "The configured provider is incomplete.")
+    }
+
+    /**
+     * Answers a plain chat message with the configured provider. No task is
+     * created. When no real provider is available — or the provider call
+     * fails — an honestly labelled system notice with the REAL state/error
+     * is stored instead of any canned reply.
+     */
+    suspend fun sendChatReply(conversationId: String) {
+        suspend fun insertNotice(text: String) {
+            chatDao.insertMessage(
+                ChatMessageEntity(
+                    id = UUID.randomUUID().toString(),
+                    conversationId = conversationId,
+                    sender = "system",
+                    content = text,
+                    timestamp = System.currentTimeMillis()
+                )
+            )
+        }
+
+        val unavailable = providerUnavailableReason()
+        if (unavailable != null) {
+            insertNotice("⚠️ **System notice — not an AI reply.** $unavailable Add your Base URL and API key in **Settings → AI Engine**, then try again.")
+            return
+        }
+
+        val provider = getActiveProvider()
+        try {
+            val history = chatDao.getMessagesForConversation(conversationId).firstOrNull().orEmpty()
+                .filter { it.sender == "user" || it.sender == "assistant" }
+                .takeLast(20)
+            val messages = mutableListOf(
+                AIMessage(
+                    role = "system",
+                    content = "You are NOVA, the assistant inside the NOVA Workspace Android app. " +
+                        "This is plain chat: answer the user directly, helpfully and concisely, " +
+                        "in the user's language and script (they may write Roman Urdu / Hinglish). " +
+                        "You cannot run tools in chat mode. If the user asks for an action " +
+                        "(open a site, search, create a file), tell them to phrase it as a direct " +
+                        "request and the agent will pick it up as a task."
+                )
+            )
+            for (m in history) {
+                messages.add(AIMessage(role = if (m.sender == "user") "user" else "assistant", content = m.content))
+            }
+            val response = provider.sendMessage(messages, emptyList())
+            val text = response.text?.takeIf { it.isNotBlank() }
+                ?: "(The model returned an empty reply.)"
+            chatDao.insertMessage(
+                ChatMessageEntity(
+                    id = UUID.randomUUID().toString(),
+                    conversationId = conversationId,
+                    sender = "assistant",
+                    content = text,
+                    timestamp = System.currentTimeMillis()
+                )
+            )
+        } catch (e: Exception) {
+            insertNotice("⚠️ **System notice — not an AI reply.** The AI provider could not answer: ${e.message ?: "unknown error"}")
+        }
     }
 
     suspend fun initializeSeedData() {
