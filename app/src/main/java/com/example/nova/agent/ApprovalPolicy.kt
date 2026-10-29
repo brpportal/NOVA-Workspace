@@ -62,6 +62,7 @@ object ApprovalPolicy {
         "get_set_of_marks", "clear_set_of_marks",
         // Trained Task #1: read-only link collection (never submits/posts)
         "collect_facebook_post_links",
+        "collect_screenshots",
         // Workspace / memory reads
         "file_list", "file_read", "file_search", "file_get_metadata",
         "memory_retrieve"

@@ -9,6 +9,8 @@ import com.example.nova.trained.FacebookExtractionMode
 import com.example.nova.trained.FacebookLinksCollector
 import com.example.nova.trained.FacebookPostLinks
 import com.example.nova.trained.FacebookRunArtifacts
+import com.example.nova.trained.ScreenshotsCollection
+import com.example.nova.trained.ScreenshotsCollector
 import com.example.nova.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -268,6 +270,111 @@ class ToolExecutor(
                             true, sb.toString(),
                             outputFiles = (if (saved) listOf(rel) else emptyList()) + savedArtifacts
                         )
+                    }
+                }
+                "collect_screenshots" -> {
+                    // Trained Task #2 (AI mode): the SAME deterministic
+                    // core as the Tasks-screen Screenshots Collection.
+                    // For each Facebook profile URL: capture the profile
+                    // page, find its latest posts with Task #1's core,
+                    // then capture each post. Any other URL gets one
+                    // direct screenshot. AI-mode hooks never pause: a
+                    // login wall returns LOGIN_REQUIRED at once — the
+                    // model must hand it to the user; credentials are
+                    // never touched.
+                    val rawUrls = mutableListOf<String>()
+                    val urlsArray = arguments.optJSONArray("urls")
+                    if (urlsArray != null) {
+                        for (i in 0 until urlsArray.length()) {
+                            urlsArray.optString(i).takeIf { it.isNotBlank() }?.let { rawUrls += it }
+                        }
+                    }
+                    if (rawUrls.isEmpty()) {
+                        arguments.optString("url").trim().takeIf { it.isNotBlank() }?.let { rawUrls += it }
+                    }
+                    if (rawUrls.isEmpty()) {
+                        arguments.optString("urls").takeIf { it.isNotBlank() }?.let { rawUrls += it }
+                    }
+                    val postsPerProfile = ScreenshotsCollection.clampPostsPerProfile(
+                        arguments.optInt("posts_per_profile", ScreenshotsCollection.DEFAULT_POSTS_PER_PROFILE)
+                    )
+                    val mode = FacebookExtractionMode.fromToolArg(
+                        arguments.optString("method")
+                    )
+                    val parse = FacebookPostLinks.parseCollectorInput(rawUrls.joinToString("\n"))
+                    if (parse.sources.isEmpty()) {
+                        ToolExecutionResult(false, "urls is required (at least one valid http(s) URL)", error = "urls is required")
+                    } else {
+                        val aiHooks = object : FacebookLinksCollector.Hooks {
+                            override suspend fun onStep(message: String) {}
+                            override suspend fun onWaitStart(reason: String) {}
+                            override suspend fun onWaitEnd(resumed: Boolean) {}
+                            override suspend fun onLoginWall(profileUrl: String) =
+                                FacebookLinksCollector.LoginWallDecision.SKIP_PROFILE
+                        }
+                        val startedMs = System.currentTimeMillis()
+                        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                            .format(java.util.Date(startedMs))
+                        val runRel = "AI-Tasks/screenshots-$stamp"
+                        workspaceManager.createDirectory("AI-Tasks")
+                        workspaceManager.createDirectory(runRel)
+                        val collector = ScreenshotsCollector(
+                            browserController,
+                            FacebookLinksCollector(browserController),
+                            workspaceManager.resolve(runRel),
+                            runRel
+                        )
+                        val outcome = collector.collectAll(
+                            parse.sources, parse.labels, postsPerProfile, aiHooks, mode
+                        )
+                        val config = ScreenshotsCollection.RunConfig(
+                            sources = parse.sources,
+                            postsPerProfile = postsPerProfile,
+                            mode = mode,
+                            runFolder = runRel,
+                            startedAtMs = startedMs,
+                            finishedAtMs = System.currentTimeMillis(),
+                            invalidSourceLines = parse.invalidLines.size,
+                            duplicateSourceLines = parse.duplicatesRemoved
+                        )
+                        val indexRel = "$runRel/index.md"
+                        val summaryRel = "$runRel/summary.json"
+                        val savedIndex = workspaceManager.writeFile(
+                            indexRel,
+                            ScreenshotsCollection.buildIndexMarkdown(outcome.results, config, outcome.stopReason)
+                        )
+                        val savedSummary = workspaceManager.writeFile(
+                            summaryRel,
+                            ScreenshotsCollection.buildSummaryJson(outcome.results, config)
+                        )
+                        val outputFiles = mutableListOf<String>()
+                        val sb = StringBuilder()
+                        sb.append("Screenshots run folder: ").append(runRel).append('\n')
+                        sb.append("Discovery method: ").append(mode.displayName())
+                            .append(" · Post screenshots per profile: ").append(postsPerProfile).append('\n')
+                        for (result in outcome.results) {
+                            sb.append(result.label).append(": ").append(result.normalizedUrl).append('\n')
+                            sb.append("  Status: ").append(result.status.name)
+                            result.note?.let { sb.append(" — ").append(it) }
+                            sb.append('\n')
+                            for (shot in result.shots) {
+                                sb.append("  - ").append(shot.relativePath)
+                                shot.postUrl?.let { sb.append(" (post: ").append(it).append(')') }
+                                shot.jpegRelativePath?.let { sb.append(" + JPEG copy: ").append(it) }
+                                sb.append('\n')
+                                outputFiles += shot.relativePath
+                                shot.jpegRelativePath?.let { outputFiles += it }
+                            }
+                        }
+                        sb.append(ScreenshotsCollection.statusSummaryLine(outcome.results))
+                            .append(" · ").append(ScreenshotsCollection.totalShotsTaken(outcome.results))
+                            .append(" screenshot(s)\n")
+                        outcome.stopReason?.let { sb.append("Stopped early: ").append(it).append('\n') }
+                        if (savedIndex) sb.append("Index: ").append(indexRel).append('\n')
+                        if (savedSummary) sb.append("Summary: ").append(summaryRel).append('\n')
+                        if (savedIndex) outputFiles += indexRel
+                        if (savedSummary) outputFiles += summaryRel
+                        ToolExecutionResult(true, sb.toString(), outputFiles = outputFiles)
                     }
                 }
                 "task_record_artifact" -> {

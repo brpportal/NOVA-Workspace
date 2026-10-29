@@ -77,9 +77,9 @@ class AgentLoop(
             "observe_page", "click_element", "type_text", "tap",
             "browser_back", "browser_forward", "browser_reload", "wait_for_load",
             "vault_autofill",
-            // Trained Task #1 (AI mode): drives the shared browser like the
-            // other browser tools (manual-control block + AGENT_ACTIVE).
-            "collect_facebook_post_links"
+            // Trained Tasks #1/#2 (AI mode): drive the shared browser like
+            // the other browser tools (manual-control block + AGENT_ACTIVE).
+            "collect_facebook_post_links", "collect_screenshots"
         )
 
         /**

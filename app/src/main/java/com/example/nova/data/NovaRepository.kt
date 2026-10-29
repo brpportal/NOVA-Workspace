@@ -22,6 +22,10 @@ import com.example.nova.trained.FacebookPostLinks
 import com.example.nova.trained.FacebookProfileResult
 import com.example.nova.trained.FacebookProfileStatus
 import com.example.nova.trained.FacebookRunArtifacts
+import com.example.nova.trained.ScreenshotSourceResult
+import com.example.nova.trained.ScreenshotsCollection
+import com.example.nova.trained.ScreenshotsCollector
+import com.example.nova.trained.ScreenshotsRunResult
 import com.example.nova.security.PermissionManager
 import com.example.nova.security.VaultManager
 import com.example.nova.workspace.WorkspaceManager
@@ -434,6 +438,7 @@ class NovaRepository(
 
         /** Workspace file holding the collector's saved profile list. */
         const val FACEBOOK_PROFILES_FILE = "AI-Tasks/facebook-profiles.txt"
+        const val SCREENSHOT_PROFILES_FILE = "AI-Tasks/screenshot-profiles.txt"
 
         @Volatile
         private var INSTANCE: NovaRepository? = null
@@ -657,6 +662,17 @@ class NovaRepository(
     fun loadSavedFacebookProfiles(): String =
         try {
             workspaceManager.readFile(FACEBOOK_PROFILES_FILE)
+        } catch (e: Exception) {
+            ""
+        }
+
+    /** Live state of the latest Trained Task #2 run (Mode 1), for the Tasks UI. */
+    val lastScreenshotsRun = MutableStateFlow<ScreenshotsRunResult?>(null)
+
+    /** The saved source list for the screenshots form (blank when none saved yet). */
+    fun loadSavedScreenshotProfiles(): String =
+        try {
+            workspaceManager.readFile(SCREENSHOT_PROFILES_FILE)
         } catch (e: Exception) {
             ""
         }
@@ -980,6 +996,319 @@ class NovaRepository(
                 running = false,
                 summaryLine = loginStoppedLabel
                     ?: (summary + (stopNote?.let { " Stopped early: $it" } ?: "")),
+                mode = mode,
+                artifactPaths = writtenArtifacts.toList()
+            )
+        }
+        agentLoop.registerJob(taskId, job)
+        return taskId
+    }
+
+    /**
+     * TRAINED TASK #2 (Mode 1) — Screenshots Collection, launched from
+     * the Tasks screen. Spark's second core feature and the sibling of
+     * the links collector: for every Facebook profile it captures the
+     * profile page, discovers the latest posts with Task #1's core,
+     * then captures each post; any other URL gets a single direct
+     * screenshot. Fully deterministic: ZERO provider/LLM calls. The
+     * chain visits every source in order and pauses ONLY on a login
+     * wall (task WAITING / Needs you, until the user logs in and hands
+     * control back). Everything lands in
+     * AI-Tasks/screenshots-<yyyyMMdd-HHmm>/ (per-source subfolders,
+     * index.md + summary.json) and every file is registered under
+     * Files → Created by Spark. Returns the task id immediately; the
+     * run is cancellable via the normal Stop Task path (captured shots
+     * and the index/summary are still written for what exists).
+     */
+    fun launchScreenshotsCollectorFromText(
+        rawText: String,
+        postsPerProfile: Int,
+        saveList: Boolean,
+        mode: FacebookExtractionMode
+    ): String {
+        val parse = FacebookPostLinks.parseCollectorInput(rawText)
+        val sources = parse.sources
+        val labels = parse.labels
+        val safePosts = ScreenshotsCollection.clampPostsPerProfile(postsPerProfile)
+        val taskId = UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+        val fileStamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date(now))
+        val runRel = "AI-Tasks/screenshots-$fileStamp"
+        val indexRelPath = "$runRel/index.md"
+        val summaryRelPath = "$runRel/summary.json"
+
+        val task = AgentTaskEntity(
+            id = taskId,
+            title = "Screenshots Collector",
+            prompt = "Trained task (no AI) — Screenshots Collection: capture the profile page plus the latest $safePosts post screenshot(s) for ${sources.size} source(s), discovery method ${mode.displayName()}. Runs deterministically without AI; pauses as Needs you only on a Facebook login wall.",
+            status = "PENDING",
+            progressPercent = 0,
+            currentOperation = "Starting screenshots collection",
+            createdAt = now,
+            updatedAt = now
+        )
+
+        lastScreenshotsRun.value = ScreenshotsRunResult(
+            taskId = taskId,
+            postsPerProfile = safePosts,
+            totalSources = sources.size,
+            runFolderPath = runRel,
+            running = true,
+            mode = mode
+        )
+
+        val linksCollector = FacebookLinksCollector(browserController)
+        val runDir = workspaceManager.resolve(runRel)
+        val collector = ScreenshotsCollector(browserController, linksCollector, runDir, runRel)
+
+        val job = scope.launch {
+            val stepCounter = AtomicInteger(0)
+            val collected = mutableListOf<ScreenshotSourceResult>()
+            var terminalStatus = "COMPLETED"
+            var terminalError: String? = null
+            var stopNote: String? = null
+            var loginStoppedLabel: String? = null
+
+            suspend fun recordStep(message: String) {
+                try {
+                    taskDao.insertStep(
+                        TaskStepEntity(
+                            taskId = taskId,
+                            stepNumber = stepCounter.incrementAndGet(),
+                            description = message,
+                            toolName = "screenshots_collector",
+                            status = "COMPLETED"
+                        )
+                    )
+                    val t = taskDao.getTaskById(taskId)
+                    if (t != null && (t.status == "RUNNING" || t.status == "PENDING")) {
+                        taskDao.updateTask(t.copy(currentOperation = message, updatedAt = System.currentTimeMillis()))
+                    }
+                } catch (ignored: Exception) {
+                }
+            }
+
+            suspend fun setTaskStatus(status: String, operation: String? = null) {
+                val t = taskDao.getTaskById(taskId) ?: return
+                taskDao.updateTask(
+                    t.copy(
+                        status = status,
+                        currentOperation = operation ?: t.currentOperation,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+            }
+
+            // Enters the Needs-you state: task WAITING (fires the "Needs
+            // you" notification) and, unless the user already holds the
+            // browser, the control mode that makes the Browser screen
+            // offer its hand-back bar.
+            suspend fun enterNeedsYou(operation: String) {
+                setTaskStatus("WAITING", operation)
+                if (browserController.controlMode.value != BrowserControlMode.MANUAL_CONTROL) {
+                    browserController.updateControlMode(BrowserControlMode.WAITING_APPROVAL)
+                }
+            }
+
+            val hooks = object : FacebookLinksCollector.Hooks {
+                override suspend fun onStep(message: String) = recordStep(message)
+
+                override suspend fun onWaitStart(reason: String) {
+                    recordStep(reason)
+                    enterNeedsYou("Needs you — hand the browser back to continue capturing")
+                    // The collector itself polls for the hand-back.
+                }
+
+                override suspend fun onWaitEnd(resumed: Boolean) {
+                    if (resumed) setTaskStatus("RUNNING", "Resumed after hand-back")
+                }
+
+                override suspend fun onLoginWall(profileUrl: String): FacebookLinksCollector.LoginWallDecision {
+                    recordStep("Login wall at $profileUrl — Needs you: log in to Facebook in the Browser tab, then hand control back")
+                    enterNeedsYou("Needs you — log in to Facebook")
+                    // Poll here (the collector does not poll for login):
+                    // hand-back → retry this source; cancel/timeout →
+                    // stop the run honestly.
+                    val deadline = System.currentTimeMillis() + FacebookLinksCollector.CONTROL_WAIT_TIMEOUT_MS
+                    while (System.currentTimeMillis() < deadline) {
+                        val t = taskDao.getTaskById(taskId)
+                        if (t == null || t.status == "CANCELLED") {
+                            return FacebookLinksCollector.LoginWallDecision.STOP_RUN
+                        }
+                        when (browserController.controlMode.value) {
+                            BrowserControlMode.AGENT_ACTIVE -> {
+                                setTaskStatus("RUNNING", "Login done — resuming capture")
+                                return FacebookLinksCollector.LoginWallDecision.RETRY_PROFILE
+                            }
+                            BrowserControlMode.STANDBY ->
+                                return FacebookLinksCollector.LoginWallDecision.STOP_RUN
+                            else -> delay(600)
+                        }
+                    }
+                    return FacebookLinksCollector.LoginWallDecision.STOP_RUN
+                }
+            }
+
+            try {
+                taskDao.insertTask(task)
+                workspaceManager.createDirectory(runRel)
+                if (saveList) {
+                    try {
+                        workspaceManager.createDirectory("AI-Tasks")
+                        workspaceManager.writeFile(SCREENSHOT_PROFILES_FILE, sources.joinToString("\n"))
+                    } catch (ignored: Exception) {
+                    }
+                }
+                setTaskStatus("RUNNING", "Collecting screenshots")
+                recordStep("Screenshots collection started: ${sources.size} source(s), profile + $safePosts post screenshot(s) per profile, discovery ${mode.displayName()} — no AI, deterministic run")
+                if (parse.duplicatesRemoved > 0) {
+                    recordStep("${parse.duplicatesRemoved} duplicate source line(s) removed before the run")
+                }
+                for (invalidLine in parse.invalidLines) {
+                    recordStep("Line ${invalidLine.lineNumber} is not a valid URL — skipped, not run: ${invalidLine.raw}")
+                }
+
+                val outcome = collector.collectAll(sources, labels, safePosts, hooks, mode) { result ->
+                    collected.add(result)
+                    val t = taskDao.getTaskById(taskId)
+                    if (t != null && t.status != "CANCELLED") {
+                        taskDao.updateTask(
+                            t.copy(
+                                progressPercent = collected.size * 100 / sources.size.coerceAtLeast(1),
+                                updatedAt = System.currentTimeMillis()
+                            )
+                        )
+                    }
+                    lastScreenshotsRun.value = lastScreenshotsRun.value?.copy(results = collected.toList())
+                }
+                stopNote = outcome.stopReason
+                if (outcome.stoppedEarly) {
+                    terminalStatus = "FAILED"
+                    terminalError = outcome.stopReason
+                    if (outcome.stoppedForLogin) {
+                        val pending = sources.size - collected.count {
+                            it.status != FacebookProfileStatus.LOGIN_REQUIRED
+                        }
+                        loginStoppedLabel = "Stopped — waiting for login " +
+                            "($pending source${if (pending == 1) "" else "s"} pending)"
+                    }
+                }
+            } catch (e: CancellationException) {
+                // Stop Task: whatever was captured is still indexed below.
+                terminalStatus = "FAILED"
+                stopNote = "Run cancelled before finishing."
+            } catch (e: Exception) {
+                terminalStatus = "FAILED"
+                terminalError = ProviderErrors.userMessage(e)
+            }
+
+            // Index + summary — always written once the task exists
+            // (partial results included), and EVERY file of the run
+            // (each image, its JPEG copy when present, the index and
+            // the summary) is registered in Created by Spark.
+            val summary = ScreenshotsCollection.statusSummaryLine(collected)
+            val shotsTaken = ScreenshotsCollection.totalShotsTaken(collected)
+            var writtenIndex: String? = null
+            val writtenArtifacts = mutableListOf<String>()
+            try {
+                if (taskDao.getTaskById(taskId) != null) {
+                    workspaceManager.createDirectory(runRel)
+                    fun registerExisting(relPath: String): Boolean {
+                        return try {
+                            val meta = workspaceManager.getFileMetadata(relPath)
+                            agentCreatedFileDao.insertCreatedFile(
+                                AgentCreatedFileEntity(
+                                    relativePath = relPath,
+                                    name = meta.name,
+                                    taskId = taskId,
+                                    mimeType = meta.mimeType,
+                                    sizeBytes = meta.sizeBytes,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                            true
+                        } catch (ignored: Exception) {
+                            false
+                        }
+                    }
+                    // Images first (the collector wrote them to disk).
+                    for (result in collected) {
+                        for (shot in result.shots) {
+                            if (registerExisting(shot.relativePath)) {
+                                writtenArtifacts += shot.relativePath
+                            }
+                            shot.jpegRelativePath?.let { jpeg ->
+                                if (registerExisting(jpeg)) {
+                                    writtenArtifacts += jpeg
+                                }
+                            }
+                        }
+                    }
+                    val config = ScreenshotsCollection.RunConfig(
+                        sources = sources,
+                        postsPerProfile = safePosts,
+                        mode = mode,
+                        runFolder = runRel,
+                        startedAtMs = now,
+                        finishedAtMs = System.currentTimeMillis(),
+                        invalidSourceLines = parse.invalidLines.size,
+                        duplicateSourceLines = parse.duplicatesRemoved
+                    )
+                    val indexMd = ScreenshotsCollection.buildIndexMarkdown(collected, config, stopNote)
+                    if (workspaceManager.writeFile(indexRelPath, indexMd) && registerExisting(indexRelPath)) {
+                        writtenIndex = indexRelPath
+                        writtenArtifacts += indexRelPath
+                    }
+                    val summaryJson = ScreenshotsCollection.buildSummaryJson(collected, config)
+                    if (workspaceManager.writeFile(summaryRelPath, summaryJson) && registerExisting(summaryRelPath)) {
+                        writtenArtifacts += summaryRelPath
+                    }
+                    if (writtenArtifacts.isNotEmpty()) {
+                        recordStep("Artifacts written: ${writtenArtifacts.joinToString(", ")}")
+                    }
+                }
+            } catch (ignored: Exception) {
+            }
+
+            val current = taskDao.getTaskById(taskId)
+            if (current != null && current.status != "CANCELLED") {
+                taskDao.updateTask(
+                    current.copy(
+                        status = terminalStatus,
+                        progressPercent = if (terminalStatus == "COMPLETED") 100 else current.progressPercent,
+                        currentOperation = if (terminalStatus == "COMPLETED") {
+                            "Done — $summary · $shotsTaken screenshot${if (shotsTaken == 1) "" else "s"}"
+                        } else {
+                            loginStoppedLabel ?: terminalError ?: stopNote ?: "Stopped"
+                        },
+                        errorMessage = if (terminalStatus == "FAILED") (terminalError ?: stopNote) else null,
+                        createdFilesJson = writtenArtifacts.takeIf { it.isNotEmpty() }
+                            ?.let { org.json.JSONArray(it).toString() },
+                        updatedAt = System.currentTimeMillis(),
+                        completedAt = System.currentTimeMillis()
+                    )
+                )
+            }
+            // The run is over: release the browser back to standby (never
+            // yank it out of the user's hands if they hold it).
+            when (browserController.controlMode.value) {
+                BrowserControlMode.AGENT_ACTIVE,
+                BrowserControlMode.WAITING_APPROVAL,
+                BrowserControlMode.PAUSED ->
+                    browserController.updateControlMode(BrowserControlMode.STANDBY)
+                else -> Unit
+            }
+            lastScreenshotsRun.value = ScreenshotsRunResult(
+                taskId = taskId,
+                postsPerProfile = safePosts,
+                totalSources = sources.size,
+                results = collected.toList(),
+                runFolderPath = runRel,
+                indexFilePath = writtenIndex,
+                running = false,
+                summaryLine = loginStoppedLabel
+                    ?: (summary + " · $shotsTaken screenshot${if (shotsTaken == 1) "" else "s"}" +
+                        (stopNote?.let { " Stopped early: $it" } ?: "")),
                 mode = mode,
                 artifactPaths = writtenArtifacts.toList()
             )

@@ -51,11 +51,12 @@ class WorkspaceSeedingTest {
 
     @Test
     fun `environment pack metadata is consistent`() {
-        // Pack v2: 12 SKILL.md files — the 6 converted pack docs,
+        // Pack v2: 13 SKILL.md files — the 6 converted pack docs,
         // phone-agent-playbook and research-with-sources (Phase 3),
         // browser-mastery, browser-cursor-control and keyboard-and-typing
-        // (browser fix round), plus facebook-post-links (Trained Task #1).
-        assertEquals(12, WorkspaceManager.ENVIRONMENT_FILES.size)
+        // (browser fix round), facebook-post-links (Trained Task #1),
+        // plus screenshots-collection (Trained Task #2).
+        assertEquals(13, WorkspaceManager.ENVIRONMENT_FILES.size)
         assertTrue(WorkspaceManager.ENVIRONMENT_PACK_BYTES > 0)
         assertTrue(WorkspaceManager.environmentPackSizeLabel().endsWith("MB"))
         for (path in WorkspaceManager.ENVIRONMENT_FILES) {

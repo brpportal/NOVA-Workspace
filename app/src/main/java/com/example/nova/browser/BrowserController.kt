@@ -1449,6 +1449,72 @@ class BrowserController(private val appContext: Context? = null) {
         }
     }
 
+    /** Outcome of a named viewport capture (Trained Task #2). */
+    data class ViewportCapture(
+        val success: Boolean,
+        val message: String,
+        /** The PNG file written (null on failure). */
+        val pngFile: File? = null,
+        /** JPEG copy written next to the PNG when the PNG exceeded the size threshold. */
+        val jpegFile: File? = null
+    )
+
+    /**
+     * Captures the WebView's current viewport into EXACTLY [targetPngFile]
+     * (same draw path as [takeScreenshot], but caller-named so trained
+     * tasks can lay out profile.png / post-1.png evidence files). When
+     * the PNG exceeds [jpegThresholdBytes], a JPEG copy at quality 85 is
+     * written next to it (same base name, .jpg) and reported in the
+     * result — the PNG stays the canonical artifact either way.
+     */
+    suspend fun captureViewportToFile(
+        targetPngFile: File,
+        jpegThresholdBytes: Long = 6_000_000L
+    ): ViewportCapture = withContext(Dispatchers.Main) {
+        val wv = obtainWebViewLocked()
+            ?: return@withContext ViewportCapture(false, "WebView not available for capture")
+        try {
+            val width = wv.width.takeIf { it > 0 } ?: 1080
+            val height = wv.height.takeIf { it > 0 } ?: 1920
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bitmap)
+            wv.draw(canvas)
+
+            targetPngFile.parentFile?.mkdirs()
+            FileOutputStream(targetPngFile).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 95, out)
+            }
+
+            var jpegFile: File? = null
+            if (targetPngFile.length() > jpegThresholdBytes) {
+                val sibling = File(
+                    targetPngFile.parentFile,
+                    targetPngFile.nameWithoutExtension + ".jpg"
+                )
+                FileOutputStream(sibling).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                }
+                if (sibling.exists() && sibling.length() > 0) jpegFile = sibling
+            }
+            bitmap.recycle()
+
+            ViewportCapture(
+                success = targetPngFile.exists() && targetPngFile.length() > 0,
+                message = "Screenshot captured to ${targetPngFile.name}",
+                pngFile = targetPngFile,
+                jpegFile = jpegFile
+            )
+        } catch (e: Exception) {
+            ViewportCapture(false, "Screenshot error: ${e.message}")
+        }
+    }
+
+    /** Scrolls the page back to the very top (trained-task captures show the page head). */
+    suspend fun scrollToTop() {
+        evaluateJs("window.scrollTo(0, 0)")
+        delay(300)
+    }
+
     /**
      * Injects credentials directly into form elements without passing raw credentials to the AI model.
      */

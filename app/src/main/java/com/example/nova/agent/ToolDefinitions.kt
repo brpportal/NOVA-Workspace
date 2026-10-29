@@ -245,6 +245,21 @@ object ToolDefinitions {
             """.trimIndent()
         ),
         AIToolDefinition(
+            name = "collect_screenshots",
+            description = "Trained Task #2: captures REAL screenshots, deterministically (no browsing decisions needed). Give a list of URLs. Each Facebook profile/Page URL gets: a screenshot of the profile page, then its latest post links are found with Trained Task #1's collector and each post page is screenshotted too (posts_per_profile, default 2, allowed 1-10). Any other http(s) URL gets one direct screenshot. `method` selects the post-discovery extraction: hybrid (default; full M1-M5 ladder), m1 (visible DOM links only), or m3 (page-source mining only). Every source returns a precise status (OK = all requested shots, PARTIAL = some, NO_POSTS, PROFILE_LOCKED, PROFILE_UNAVAILABLE, OPEN_FAILED, FB_ERROR, LOGIN_REQUIRED) and the exact workspace file paths of its screenshots, saved under AI-Tasks/screenshots-<timestamp>/ with an index.md and summary.json. If a status is LOGIN_REQUIRED, Facebook needs the user to log in: tell the user, do NOT ask for or enter any credentials, and do not retry in a loop. Never invent or guess file paths — report exactly what this tool returns.",
+            parametersSchemaJson = """
+            {
+                "type": "object",
+                "properties": {
+                    "urls": { "type": "array", "items": { "type": "string" }, "description": "URLs to capture: Facebook profile/Page URLs and/or any other http(s) URLs" },
+                    "posts_per_profile": { "type": "integer", "description": "Post screenshots per Facebook profile (1-10, default 2); the profile page itself is always captured too" },
+                    "method": { "type": "string", "enum": ["hybrid", "m1", "m3"], "description": "Post discovery method: hybrid = full M1-M5 ladder (default), m1 = visible DOM links only, m3 = structured-data mining only" }
+                },
+                "required": ["urls"]
+            }
+            """.trimIndent()
+        ),
+        AIToolDefinition(
             name = "task_record_artifact",
             description = "Saves an artifact (screenshot, extracted note, or file) to the active task folder in /AI-Tasks/.",
             parametersSchemaJson = """
