@@ -33,14 +33,25 @@ jobs:
         chmod +x gradlew
 
     # app/build.gradle.kts signs debug builds with ${rootDir}/debug.keystore,
-    # which is gitignored and not part of the AI Studio export. Generate it in CI.
-    - name: Generate debug keystore if missing
+    # which is gitignored and not part of the AI Studio export. Restore the ONE
+    # permanent keystore from secrets so every build carries the SAME signature
+    # and updates install over the previous app. Fall back to generating a
+    # throwaway keystore only when the secret is absent (e.g. forks).
+    - name: Restore permanent debug keystore
+      env:
+        DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
       run: |
         if [ ! -f debug.keystore ]; then
-          keytool -genkeypair -v -keystore debug.keystore \
-            -storepass android -alias androiddebugkey -keypass android \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+          if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
+            echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > debug.keystore
+            echo "Permanent keystore restored from secrets."
+          else
+            keytool -genkeypair -v -keystore debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "WARNING: no keystore secret; generated a throwaway keystore."
+          fi
         fi
 
     - name: Run Unit Tests
