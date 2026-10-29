@@ -10,6 +10,7 @@ import com.example.nova.trained.FacebookProfileStatus
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -426,7 +427,8 @@ class FacebookPostLinksTest {
         val json = """{"url":"https://m.facebook.com/x","title":"X","hasPassword":false,
             "hasLoginForm":false,"hasLoginGate":true,"hasPostsArea":true,"text":"hi"}"""
         val signals = FacebookPostLinks.signalsFromProbeJson(json, rendererGone = false)
-        assertTrue(signals.hasLoginGate)
+        assertTrue(signals != null)
+        assertTrue(signals!!.hasLoginGate)
         assertTrue(signals.hasPostsArea)
     }
 
