@@ -31,7 +31,10 @@ class NovaRepository(
     private val context: Context,
     private val db: AppDatabase = AppDatabase.getDatabase(context),
     val workspaceManager: WorkspaceManager = WorkspaceManager.createDefault(context),
-    val browserController: BrowserController = BrowserController(),
+    // ONE app-wide browser controller (fix round 2, Defect A): the UI
+    // repository and the WorkManager singleton used to each build their own
+    // BrowserController() — and with it, their own (missing) WebView.
+    val browserController: BrowserController = BrowserController.getInstance(context),
     val permissionManager: PermissionManager = PermissionManager(),
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
 ) {
@@ -133,6 +136,23 @@ class NovaRepository(
     val createdFiles: Flow<List<AgentCreatedFileEntity>> = agentCreatedFileDao.getAllCreatedFiles()
 
     init {
+        // Browsing history for every finished page load, including
+        // agent-driven loads while the Browser screen is closed (the
+        // controller owns the WebView now; the screen no longer records it).
+        browserController.onPageFinishedListener = { title, url ->
+            scope.launch {
+                try {
+                    browserDao.insertHistory(
+                        BrowserHistoryEntry(
+                            id = UUID.randomUUID().toString(),
+                            title = title,
+                            url = url,
+                            visitedAt = System.currentTimeMillis()
+                        )
+                    )
+                } catch (ignored: Exception) {}
+            }
+        }
         // Start background approval timeout loop (2-minute timeout)
         scope.launch {
             while (isActive) {
@@ -182,6 +202,7 @@ class NovaRepository(
                 approvalDao.updateApproval(updatedRecord)
 
                 if (!record.taskId.isNullOrBlank()) {
+                    agentLoop.onApprovalRejected(record.taskId)
                     val task = taskDao.getTaskById(record.taskId)
                     if (task != null && task.status == "WAITING_APPROVAL") {
                         taskDao.updateTask(
@@ -566,6 +587,12 @@ class NovaRepository(
                 approvalDao.updateApproval(appRecord.copy(status = "APPROVED", decidedAt = System.currentTimeMillis()))
             }
 
+            // "Approve & remember for this task": the approved action CLASS
+            // is granted for the rest of this task, so the same kind of
+            // action does not pause it again (history records are still
+            // written, marked as remembered-grant decisions).
+            agentLoop.onApprovalGranted(taskId)
+
             // Resume task
             val updated = task.copy(
                 status = "RUNNING",
@@ -593,6 +620,7 @@ class NovaRepository(
             if (appRecord != null && appRecord.status == "PENDING") {
                 approvalDao.updateApproval(appRecord.copy(status = "DENIED", decidedAt = System.currentTimeMillis()))
             }
+            agentLoop.onApprovalRejected(taskId)
 
             val updated = task.copy(
                 status = "CANCELLED",

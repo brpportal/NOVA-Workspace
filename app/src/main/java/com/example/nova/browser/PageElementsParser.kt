@@ -23,6 +23,14 @@ object PageElementsParser {
 
     const val MAX_ELEMENTS = 60
 
+    /**
+     * Cheap identity of a page state for the observation cache (fix round
+     * 2, Defect E loop economy): same URL + same DOM size means the page
+     * the agent already observed — re-extracting it would only waste a
+     * provider round-trip. Any navigation or DOM change changes the key.
+     */
+    fun cacheKey(url: String, domLength: Int): String = "${url.trim()}|dom:$domLength"
+
     fun parse(payload: String?): PageObservation {
         if (payload.isNullOrBlank()) return PageObservation()
         val root = try {
@@ -62,7 +70,10 @@ object PageElementsParser {
             url = root.optString("url"),
             title = root.optString("title"),
             elements = elements,
-            textExcerpt = root.optString("text").replace(Regex("\\s+"), " ").trim().take(4000)
+            textExcerpt = root.optString("text").replace(Regex("\\s+"), " ").trim().take(4000),
+            scrollY = root.optInt("scrollY", 0).coerceAtLeast(0),
+            viewportHeight = root.optInt("viewportHeight", 0).coerceAtLeast(0),
+            pageHeight = root.optInt("pageHeight", 0).coerceAtLeast(0)
         )
     }
 }

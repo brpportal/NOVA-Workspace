@@ -1,14 +1,6 @@
 package com.example.nova.ui.screens
 
 import android.annotation.SuppressLint
-import android.graphics.Bitmap
-import android.net.http.SslError
-import android.view.ViewGroup
-import android.webkit.SslErrorHandler
-import android.webkit.WebChromeClient
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -70,7 +62,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -82,6 +73,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
@@ -92,7 +84,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.nova.browser.BrowserControlMode
 import com.example.nova.data.BookmarkEntity
-import com.example.nova.data.BrowserHistoryEntry
 import com.example.nova.data.NovaRepository
 import com.example.nova.ui.components.AICursorOverlay
 import com.example.nova.ui.components.AIKeystrokeOverlay
@@ -105,8 +96,6 @@ import com.example.ui.theme.WarmError
 import com.example.ui.theme.WarmSuccess
 import com.example.ui.theme.WarmWarning
 import kotlinx.coroutines.launch
-import java.io.File
-import java.util.UUID
 
 @OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("SetJavaScriptEnabled")
@@ -146,6 +135,16 @@ fun BrowserScreen(
 
     LaunchedEffect(tabState.url) {
         urlInputText = tabState.url
+    }
+
+    // SSL errors are recorded on the tab state by the controller's
+    // WebViewClient (it cancels the load); surface the dialog from here.
+    LaunchedEffect(tabState.sslErrorDesc) {
+        val desc = tabState.sslErrorDesc
+        if (!desc.isNullOrBlank()) {
+            sslAlertDialog = desc
+            browserController.updateTabState { it.copy(sslErrorDesc = null) }
+        }
     }
 
     BackHandler(enabled = tabState.canGoBack) {
@@ -398,96 +397,24 @@ fun BrowserScreen(
         }
 
         // --- NATIVE ANDROID WEBVIEW & LIVE OVERLAYS ---
+        // The WebView is owned by the (singleton) BrowserController — it
+        // exists whether or not this screen is open (fix round 2, Defect
+        // A). This screen only re-parents it into a container so the user
+        // watches the exact page the agent drives; releasing the container
+        // detaches the view WITHOUT destroying it.
         Box(modifier = Modifier.fillMaxSize().weight(1f)) {
             AndroidView(
                 factory = { ctx ->
-                    WebView(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-
-                        settings.apply {
-                            javaScriptEnabled = true
-                            domStorageEnabled = true
-                            useWideViewPort = true
-                            loadWithOverviewMode = true
-                            builtInZoomControls = true
-                            displayZoomControls = false
-                            allowFileAccess = false
-                            allowContentAccess = false
-                            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                            userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 Spark/1.0"
-                        }
-
-                        webViewClient = object : WebViewClient() {
-                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                super.onPageStarted(view, url, favicon)
-                                browserController.updateTabState {
-                                    it.copy(
-                                        isLoading = true,
-                                        url = url ?: it.url,
-                                        canGoBack = view?.canGoBack() == true,
-                                        canGoForward = view?.canGoForward() == true,
-                                        isSecure = url?.startsWith("https://") == true
-                                    )
-                                }
-                            }
-
-                            override fun onPageFinished(view: WebView?, url: String?) {
-                                super.onPageFinished(view, url)
-                                val title = view?.title ?: "Webpage"
-                                browserController.updateTabState {
-                                    it.copy(
-                                        isLoading = false,
-                                        title = title,
-                                        url = url ?: it.url,
-                                        canGoBack = view?.canGoBack() == true,
-                                        canGoForward = view?.canGoForward() == true
-                                    )
-                                }
-                                if (!url.isNullOrBlank() && url != "about:blank") {
-                                    scope.launch {
-                                        repository.browserDao.insertHistory(
-                                            BrowserHistoryEntry(
-                                                id = UUID.randomUUID().toString(),
-                                                title = title,
-                                                url = url,
-                                                visitedAt = System.currentTimeMillis()
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-
-                            override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
-                                handler?.cancel()
-                                browserController.updateTabState {
-                                    it.copy(isSecure = false, sslErrorDesc = "SSL/TLS Certificate verification failed.")
-                                }
-                                sslAlertDialog = "The webpage certificate could not be verified (${error?.primaryError}). Connection cancelled for your protection."
-                            }
-                        }
-
-                        webChromeClient = object : WebChromeClient() {
-                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                browserController.updateTabState {
-                                    it.copy(progress = newProgress, isLoading = newProgress < 100)
-                                }
-                            }
-
-                            override fun onReceivedTitle(view: WebView?, title: String?) {
-                                if (!title.isNullOrBlank()) {
-                                    browserController.updateTabState { it.copy(title = title) }
-                                }
-                            }
-                        }
-
-                        browserController.bindWebView(this)
-                        loadUrl(tabState.url)
+                    android.widget.FrameLayout(ctx).also { container ->
+                        browserController.attachToDisplay(container)
                     }
                 },
-                update = {},
+                update = { container ->
+                    browserController.attachToDisplay(container)
+                },
+                onRelease = { container ->
+                    browserController.detachFromDisplay(container)
+                },
                 modifier = Modifier.fillMaxSize().testTag("native_webview")
             )
 
@@ -506,6 +433,76 @@ fun BrowserScreen(
                 contentAlignment = Alignment.Center
             ) {
                 AIKeystrokeOverlay(keystrokeState = aiKeystrokeState)
+            }
+
+            // TOUCH SHIELD (fix round 2, Defect B): single-controller rule.
+            // While the AI controls the browser (or waits for approval),
+            // the user's touches must NOT reach the page — this transparent
+            // layer swallows every gesture until the user presses the
+            // "Take control" button in the bottom bar.
+            if (controlMode == BrowserControlMode.AGENT_ACTIVE || controlMode == BrowserControlMode.WAITING_APPROVAL) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("browser_touch_shield")
+                        .pointerInput(controlMode) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    awaitPointerEvent().changes.forEach { change -> change.consume() }
+                                }
+                            }
+                        }
+                )
+            }
+        }
+
+        // GLOBAL APPROVAL BAR (fix round 2, Defect D): a task waiting for
+        // approval can be decided right here on the Browser screen — the
+        // user no longer has to hunt for the Tasks page.
+        val approvalTask = tasks.firstOrNull { it.status == "WAITING_APPROVAL" }
+        if (approvalTask != null) {
+            Surface(
+                color = WarmWarning.copy(alpha = 0.10f),
+                shadowElevation = 4.dp,
+                modifier = Modifier.fillMaxWidth().testTag("browser_approval_bar")
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Warning, contentDescription = null, tint = WarmWarning, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Approval needed: ${approvalTask.pendingApprovalToolName ?: "action"}",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        )
+                    }
+                    if (!approvalTask.pendingApprovalArgumentsJson.isNullOrBlank()) {
+                        Text(
+                            text = approvalTask.pendingApprovalArgumentsJson!!,
+                            style = MaterialTheme.typography.labelSmall.copy(color = StoneMuted),
+                            maxLines = 3
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { repository.approveTask(approvalTask.id, "ALLOW_ONCE") },
+                            colors = ButtonDefaults.buttonColors(containerColor = WarmSuccess),
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.weight(1f).testTag("browser_approve_button")
+                        ) {
+                            Text("Approve", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                        OutlinedButton(
+                            onClick = { repository.rejectTask(approvalTask.id) },
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.weight(1f).testTag("browser_deny_button")
+                        ) {
+                            Text("Deny", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = WarmError)
+                        }
+                    }
+                }
             }
         }
 
@@ -653,9 +650,7 @@ fun BrowserScreen(
         )
     }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            browserController.unbindWebView()
-        }
-    }
+    // NOTE (fix round 2): leaving this screen must NOT unbind or destroy
+    // the WebView — the controller owns it and the agent keeps its page.
+    // AndroidView's onRelease above only detaches it from the container.
 }

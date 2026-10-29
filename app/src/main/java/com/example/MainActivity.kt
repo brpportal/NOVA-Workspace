@@ -25,7 +25,12 @@ class MainActivity : ComponentActivity() {
         TaskNotificationHelper.ensureChannel(applicationContext)
         TaskNotificationHelper.requestPermissionIfNeeded(this)
 
-        repository = NovaRepository(applicationContext)
+        // The getInstance singleton (fix round 2, Defect A): the UI, the
+        // chat/agent stack and the WorkManager worker must all share ONE
+        // repository — and with it ONE BrowserController and ONE WebView.
+        // Constructing a second repository here used to strand every
+        // chat-launched browser task on a controller with no WebView.
+        repository = NovaRepository.getInstance(applicationContext)
 
         setContent {
             var isDarkTheme by remember { mutableStateOf(false) }

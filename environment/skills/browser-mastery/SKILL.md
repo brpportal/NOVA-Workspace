@@ -35,7 +35,14 @@ act through tools. This manual is the whole method.
 - `click_element(index)` / `type_text(index, text, clear_first, submit)` —
   your hands, by observation index. Indices die when the page changes.
 - `tap(x, y)` — coordinate fallback for canvas/image-only areas only.
-- `scroll(dx, dy)` — reveal more of the page, then observe again.
+- `scroll_down(pages)` / `scroll_up(pages)` — move through the page in
+  screen-sized chunks (`pages` may be fractional, e.g. 0.5; or pass
+  `pixels` for an exact amount). Every scroll attaches a fresh
+  observation that reports the scroll position (~% down) and whether
+  more content exists below. Scrolling never needs approval.
+- `scroll_to_element(index)` — bring an observed element into view and
+  re-observe (for elements the list shows as off-screen).
+- `scroll(dx, dy)` — raw pixel scroll; prefer the page-based tools.
 - `get_visible_text` — long-form reading of the current page text.
 - `find_element(selector)` — verify a known selector exists (rarely needed;
   indices are the normal route).
@@ -92,12 +99,35 @@ are thin, reformulate the query instead of scrolling forever.
 ## 6. Reading pages
 
 - Short pages: the observation's excerpt is enough.
-- Long articles: `get_visible_text` for the full text; scroll + observe
-  to walk down a feed or results list.
+- Long articles: `get_visible_text` for the full text; walk down feeds
+  and results lists with `scroll_down` (see the scrolling strategy
+  below).
 - Tables and dense layouts read badly as raw text — a screenshot plus
   the element list is often clearer.
 - Extract facts, don't dump pages: the final summary answers the user's
   question and cites sources.
+
+### Scrolling strategy
+
+- **Read in chunks.** One `scroll_down` ≈ one screen (with a small
+  overlap, so nothing is skipped). After each scroll, read the attached
+  observation — its "Scroll: ~N% down" line and the fresh element list
+  are your place marker.
+- **Hunt by scrolling.** If the element or text you need is not in the
+  current list, scroll down a chunk and look again; repeat until it
+  appears. If it appears in the list but is off-screen,
+  `scroll_to_element(index)` centres it and re-observes — then click or
+  type by index as usual.
+- **Stopping conditions (long / infinite pages).** Stop scrolling when:
+  the observation reports the bottom of the page (scrolling further
+  moves nothing), the target is found, the same content repeats (the
+  feed is looping), or you have covered ~5 screens without progress —
+  then work with what you have, reformulate (new query/URL), or report.
+  Infinite feeds have no bottom; never burn the whole step budget
+  chasing one.
+- **Position awareness.** Note the % before big jumps: `scroll_up`
+  returns towards the top the same way, and a fresh observation always
+  shows where you are.
 
 ## 7. Forms end-to-end
 

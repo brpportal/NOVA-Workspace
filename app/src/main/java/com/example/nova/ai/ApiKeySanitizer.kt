@@ -135,6 +135,40 @@ object ProviderErrors {
         return if (httpCode != null) "Provider error ($httpCode): $message" else message
     }
 
+    /**
+     * Shown on the task card when the provider's usage limit is hit
+     * (HTTP 429 — e.g. OpenRouter's free-models-per-day cap). Roman
+     * Urdu/English mix matching the app's user-facing copy for Al.
+     */
+    const val RATE_LIMIT_SUMMARY =
+        "Provider limit: free models ki rozana limit khatam ho gayi hai — kal reset hogi, ya doosra model/profile try karo"
+
+    /** True when [e] is a provider rate-limit / quota failure (HTTP 429). */
+    fun isRateLimitError(e: Throwable): Boolean {
+        val raw = e.message.orEmpty()
+        return raw.contains("429") ||
+            raw.contains("rate limit", ignoreCase = true) ||
+            raw.contains("Rate limit exceeded", ignoreCase = true) ||
+            raw.contains("free-models-per-day", ignoreCase = true) ||
+            raw.contains("quota", ignoreCase = true)
+    }
+
+    /**
+     * True when [e] means "the provider answered but produced nothing" —
+     * the retryable empty-response case. Covers the typed
+     * [ProviderEmptyResponseException] and the raw org.json failure text
+     * ("No value for choices") other adapters can leak when a response has
+     * no choices/content array at all.
+     */
+    fun isEmptyResponseError(e: Throwable): Boolean {
+        if (e is ProviderEmptyResponseException) return true
+        val raw = e.message.orEmpty()
+        return raw.contains("No value for choices", ignoreCase = true) ||
+            raw.contains("no choices", ignoreCase = true) ||
+            raw.contains("empty response", ignoreCase = true) ||
+            raw.contains("returned no content", ignoreCase = true)
+    }
+
     /** Walks error -> message / metadata.raw chains to the innermost text. */
     private fun deepestErrorMessage(json: org.json.JSONObject): String? {
         val errorObj = json.optJSONObject("error") ?: json

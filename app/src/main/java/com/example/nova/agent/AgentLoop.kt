@@ -3,6 +3,9 @@ package com.example.nova.agent
 import com.example.nova.ai.AIMessage
 import com.example.nova.ai.AIProviderAdapter
 import com.example.nova.ai.AIToolCall
+import com.example.nova.ai.AIToolDefinition
+import com.example.nova.ai.ProviderEmptyResponseException
+import com.example.nova.ai.ProviderErrors
 import com.example.nova.browser.BrowserControlMode
 import com.example.nova.browser.BrowserController
 import com.example.nova.data.AgentTaskEntity
@@ -18,6 +21,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -59,25 +63,107 @@ class AgentLoop(
         const val MAX_TASK_SCREENSHOTS = 12
         const val MAX_SCREENSHOT_BYTES = 5L * 1024 * 1024
 
+        /** Empty provider responses are retried this many times before failing the task. */
+        const val MAX_EMPTY_RESPONSE_RETRIES = 2
+        const val EMPTY_RETRY_BACKOFF_MS = 1200L
+
         /** Tools that drive the in-app browser (vs workspace/memory tools). */
         val BROWSER_TOOL_NAMES = setOf(
             "navigate", "get_current_url", "get_page_title", "get_visible_text",
             "find_element", "click", "type", "scroll", "take_screenshot",
+            "scroll_down", "scroll_up", "scroll_to_element",
             "get_page_state", "get_set_of_marks", "clear_set_of_marks",
             "observe_page", "click_element", "type_text", "tap",
             "browser_back", "browser_forward", "browser_reload", "wait_for_load",
             "vault_autofill"
         )
 
-        /** Browser actions after which the loop attaches a fresh observation. */
+        /**
+         * Browser actions after which the loop attaches a fresh observation.
+         * Scrolling counts (scroll addition): the viewport — and therefore
+         * which elements are visible/actionable — changed, so the next
+         * decision must be grounded in the post-scroll page.
+         */
         val PAGE_CHANGING_TOOLS = setOf(
             "navigate", "click", "click_element", "tap",
-            "browser_back", "browser_forward", "browser_reload"
+            "browser_back", "browser_forward", "browser_reload",
+            "scroll", "scroll_down", "scroll_up", "scroll_to_element"
         )
     }
 
     fun registerJob(taskId: String, job: Job) {
         activeJobs[taskId] = job
+    }
+
+    // --- Remembered approval grants (fix round 2, Defect C) ---
+    // When a task pauses for approval, the pending action's ApprovalClass
+    // is remembered here; when the user approves (NovaRepository calls
+    // onApprovalGranted), the class moves into the task's grant set, and
+    // later calls of the SAME class in the SAME task execute without
+    // re-asking (a history record is still written, marked as a
+    // remembered-grant decision).
+
+    private val pendingApprovalClasses = ConcurrentHashMap<String, String>()
+    private val taskApprovalGrants = ConcurrentHashMap<String, MutableSet<String>>()
+
+    /** Called by the repository when the user approves a paused task. */
+    fun onApprovalGranted(taskId: String) {
+        val cls = pendingApprovalClasses.remove(taskId) ?: return
+        taskApprovalGrants.getOrPut(taskId) { ConcurrentHashMap.newKeySet() }.add(cls)
+    }
+
+    /** Called by the repository when the user rejects a paused task. */
+    fun onApprovalRejected(taskId: String) {
+        pendingApprovalClasses.remove(taskId)
+    }
+
+    private fun hasTaskApprovalGrant(taskId: String, cls: ApprovalClass): Boolean =
+        taskApprovalGrants[taskId]?.contains(cls.name) == true
+
+    /**
+     * Sends one provider request, retrying EMPTY responses (fix round 2,
+     * Defect E): free router tiers sometimes answer HTTP 200 with no
+     * choices at all, which used to kill the task with org.json's raw
+     * "No value for choices". Empty responses — thrown
+     * [ProviderEmptyResponseException], other adapters' equivalent error
+     * text, or a returned response with neither text nor tool calls — are
+     * retried up to [MAX_EMPTY_RESPONSE_RETRIES] times with a short
+     * backoff; each retry is step-noted via [onRetry]. Any other error
+     * propagates immediately.
+     */
+    private suspend fun sendMessageWithEmptyRetry(
+        provider: AIProviderAdapter,
+        messages: List<AIMessage>,
+        tools: List<AIToolDefinition>,
+        onRetry: suspend (attempt: Int) -> Unit
+    ): AIResponse {
+        var retries = 0
+        while (true) {
+            try {
+                val response = provider.sendMessage(messages, tools)
+                if (!response.text.isNullOrBlank() || response.toolCalls.isNotEmpty()) {
+                    return response
+                }
+                if (retries >= MAX_EMPTY_RESPONSE_RETRIES) {
+                    throw ProviderEmptyResponseException(
+                        "Provider returned an empty response (no text, no tool calls) after $retries retries"
+                    )
+                }
+                retries++
+                onRetry(retries)
+                delay(EMPTY_RETRY_BACKOFF_MS * retries)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (ProviderErrors.isEmptyResponseError(e) && retries < MAX_EMPTY_RESPONSE_RETRIES) {
+                    retries++
+                    onRetry(retries)
+                    delay(EMPTY_RETRY_BACKOFF_MS * retries)
+                } else {
+                    throw e
+                }
+            }
+        }
     }
 
     fun cancelTask(taskId: String) {
@@ -122,6 +208,7 @@ class AgentLoop(
 
         var stepNumber = 1
         var duplicateCount = 0
+        var executedToolCount = 0
         var lastToolCallSignature = ""
         val visitedCitations = mutableListOf<JSONObject>()
         val createdFilePaths = mutableListOf<String>()
@@ -169,7 +256,17 @@ class AgentLoop(
                     messages.addAll(sanitized.messages)
                 }
 
-                val response = provider.sendMessage(messages, toolRegistry.availableTools)
+                val response = sendMessageWithEmptyRetry(
+                    provider = provider,
+                    messages = messages,
+                    tools = toolRegistry.availableTools,
+                    onRetry = { attempt ->
+                        val note = "Provider returned an empty response — retrying (attempt $attempt of $MAX_EMPTY_RESPONSE_RETRIES)"
+                        recordStep(taskId, stepNumber++, "provider_request", "", note, "FAILED")
+                        stepsRecord.add(note)
+                        logBuffer.append("[${Date()}] $note\n")
+                    }
+                )
 
                 // Keep the assistant turn in the model history. When the model
                 // calls tools, the history MUST contain ONE assistant message
@@ -198,9 +295,38 @@ class AgentLoop(
                     messages.add(AIMessage(role = "assistant", content = assistantText))
                 }
 
-                // If no tool calls requested, the agent completed the task!
+                // If no tool calls requested, the model is ending the task.
                 if (response.toolCalls.isEmpty()) {
-                    if (conversationId != null && assistantText.isNotBlank()) {
+                    // Hollow-completion guard (fix round 2, Defect F): a
+                    // task may only be COMPLETED with a real final answer.
+                    // Ending with no answer at all used to be stamped
+                    // "Task finished successfully" even when no browser
+                    // work had happened — now it fails honestly.
+                    if (assistantText.isBlank()) {
+                        val reason = "Task ended without a result"
+                        recordStep(
+                            taskId, stepNumber++, "task_result", "",
+                            "$reason: the model stopped without producing a final answer ($executedToolCount tool calls executed).",
+                            "FAILED"
+                        )
+                        lessonsStore.recordLesson(
+                            goal = task.title,
+                            failedStep = "final answer (step ${stepNumber - 1})",
+                            toolName = lastFailedTool,
+                            rawError = "$reason: empty final answer after $executedToolCount executed tool calls"
+                        )
+                        currentTask = currentTask.copy(
+                            status = "FAILED",
+                            currentOperation = "$reason — the model stopped without producing a final answer.",
+                            errorMessage = reason,
+                            completedAt = System.currentTimeMillis(),
+                            updatedAt = System.currentTimeMillis()
+                        )
+                        taskDao.updateTask(currentTask)
+                        onPresenceChange(PipelinePresence.READY)
+                        break
+                    }
+                    if (conversationId != null) {
                         chatDao.insertMessage(
                             ChatMessageEntity(
                                 id = UUID.randomUUID().toString(),
@@ -293,65 +419,105 @@ class AgentLoop(
 
                     val parsedArgs = validation.parsedArguments ?: JSONObject()
 
-                    // 2. Permission Evaluation
+                    // 2. Risk-based approval policy (fix round 2, Defect C).
+                    // The old flow pushed EVERY call through
+                    // PermissionManager with no allow rule on file, so even
+                    // get_page_title paused the task for approval — twice in
+                    // one small task after the resume replay. Now
+                    // ApprovalPolicy is the gate: read-only tools and
+                    // ordinary interactions execute directly; only
+                    // consequential classes (form submits, sensitive inputs,
+                    // purchases, posts, deletions, transfers) can pause —
+                    // and only once per class per task (remembered grants).
                     val activeUrl = browserController.getCurrentUrl().data.orEmpty()
                     val domain = PermissionManager.normalizeDomain(activeUrl)
-                    val isSensitive = toolRegistry.isSensitiveOperation(toolCall.name, toolCall.argumentsJson)
-
-                    val permRequest = PermissionRequest(
-                        action = toolCall.name,
-                        domain = domain,
-                        target = toolCall.name,
-                        description = "Execute ${toolCall.name} on $domain",
-                        isCriticalSecurityOrPayment = isSensitive
-                    )
-
-                    val decision = permissionManager.evaluate(permRequest)
-
-                    if (decision == PermissionDecision.DENIED) {
-                        recordStep(taskId, stepNumber++, toolCall.name, toolCall.argumentsJson, "Permission denied by security policy", "SKIPPED")
-                        noteToolFailure(toolCall.name, "${toolCall.name} (step ${stepNumber - 1})", "Permission denied by security policy")
-                        messages.add(AIMessage(role = "tool", content = "Permission Denied: Security policy blocks ${toolCall.name}.", toolCallId = toolCall.id, name = toolCall.name))
-                        continue
+                    val targetElement = if (toolCall.name == "click_element" || toolCall.name == "type_text") {
+                        val idx = parsedArgs.optInt("index", -1)
+                        if (idx > 0) browserController.observedElement(idx) else null
+                    } else {
+                        null
                     }
+                    val approvalClass = ApprovalPolicy.classify(toolCall.name, parsedArgs, targetElement)
 
-                    if (decision == PermissionDecision.REQUIRES_USER_APPROVAL) {
-                        // Check if tool is recognized
-                        val isRecognized = toolRegistry.getTool(toolCall.name) != null
+                    if (ApprovalPolicy.requiresApproval(toolCall.name, parsedArgs, targetElement)) {
                         val redactedArgs = SecretRedactor.redactSecrets(toolCall.argumentsJson)
-                        val summaryText = if (isRecognized) {
-                            "Tool: ${toolCall.name}\nArguments: $redactedArgs"
+                        val summaryText = "Tool: ${toolCall.name}\nArguments: $redactedArgs"
+
+                        if (hasTaskApprovalGrant(taskId, approvalClass)) {
+                            // Remembered grant: execute without pausing,
+                            // but the decision is still written to the
+                            // approvals history, marked as remembered.
+                            try {
+                                approvalDao?.insertApproval(
+                                    ApprovalRecordEntity(
+                                        id = UUID.randomUUID().toString(),
+                                        actionName = toolCall.name,
+                                        toolName = toolCall.name,
+                                        argumentsSummary = "$summaryText\nDecision: APPROVED (remembered grant — ${approvalClass.name} was already approved for this task)",
+                                        status = "APPROVED",
+                                        createdAt = System.currentTimeMillis(),
+                                        decidedAt = System.currentTimeMillis(),
+                                        taskId = taskId
+                                    )
+                                )
+                            } catch (ignored: Exception) {}
                         } else {
-                            "This action wasn't recognized. Approve it only if you expected it.\nTool: ${toolCall.name}\nArguments: $redactedArgs"
+                            // Persistent user rules (Always Allow / Never
+                            // Allow) and one-time tokens still apply on top
+                            // of the policy for consequential classes.
+                            val permRequest = PermissionRequest(
+                                action = toolCall.name,
+                                domain = domain,
+                                target = toolCall.name,
+                                description = "Execute ${toolCall.name} on $domain",
+                                isCriticalSecurityOrPayment = false
+                            )
+                            val decision = permissionManager.evaluate(permRequest)
+
+                            if (decision == PermissionDecision.DENIED) {
+                                recordStep(taskId, stepNumber++, toolCall.name, toolCall.argumentsJson, "Permission denied by security policy", "SKIPPED")
+                                noteToolFailure(toolCall.name, "${toolCall.name} (step ${stepNumber - 1})", "Permission denied by security policy")
+                                messages.add(AIMessage(role = "tool", content = "Permission Denied: Security policy blocks ${toolCall.name}.", toolCallId = toolCall.id, name = toolCall.name))
+                                continue
+                            }
+
+                            if (decision == PermissionDecision.REQUIRES_USER_APPROVAL) {
+                                // Remember the class so approving this
+                                // pause grants the class for the whole task.
+                                pendingApprovalClasses[taskId] = approvalClass.name
+
+                                // Persist approval record in Room
+                                approvalDao?.insertApproval(
+                                    ApprovalRecordEntity(
+                                        id = UUID.randomUUID().toString(),
+                                        actionName = toolCall.name,
+                                        toolName = toolCall.name,
+                                        argumentsSummary = summaryText,
+                                        status = "PENDING",
+                                        createdAt = System.currentTimeMillis(),
+                                        taskId = taskId
+                                    )
+                                )
+
+                                // Pause task and request approval in UI
+                                currentTask = currentTask.copy(
+                                    status = "WAITING_APPROVAL",
+                                    currentOperation = "Waiting for user approval to execute '${toolCall.name}'",
+                                    requiresApprovalAction = "${toolCall.name} on $domain",
+                                    pendingApprovalToolName = toolCall.name,
+                                    pendingApprovalArgumentsJson = summaryText,
+                                    updatedAt = System.currentTimeMillis()
+                                )
+                                taskDao.updateTask(currentTask)
+                                onPresenceChange(PipelinePresence.NEEDS_APPROVAL)
+                                // The Browser banner must show the truth here too:
+                                // the agent is stopped and needs the user.
+                                browserController.updateControlMode(BrowserControlMode.WAITING_APPROVAL)
+                                return@withContext // Task paused until user clicks Approve in UI
+                            }
+                            // ALLOWED by a persistent rule / one-time token:
+                            // fall through to execution.
                         }
-
-                        // Persist approval record in Room
-                        val approvalRecord = ApprovalRecordEntity(
-                            id = UUID.randomUUID().toString(),
-                            actionName = toolCall.name,
-                            toolName = toolCall.name,
-                            argumentsSummary = summaryText,
-                            status = "PENDING",
-                            createdAt = System.currentTimeMillis(),
-                            taskId = taskId
-                        )
-                        approvalDao?.insertApproval(approvalRecord)
-
-                        // Pause task and request approval in UI
-                        currentTask = currentTask.copy(
-                            status = "WAITING_APPROVAL",
-                            currentOperation = "Waiting for user approval to execute '${toolCall.name}'",
-                            requiresApprovalAction = "${toolCall.name} on $domain",
-                            pendingApprovalToolName = toolCall.name,
-                            pendingApprovalArgumentsJson = summaryText,
-                            updatedAt = System.currentTimeMillis()
-                        )
-                        taskDao.updateTask(currentTask)
-                        onPresenceChange(PipelinePresence.NEEDS_APPROVAL)
-                        // The Browser banner must show the truth here too:
-                        // the agent is stopped and needs the user.
-                        browserController.updateControlMode(BrowserControlMode.WAITING_APPROVAL)
-                        return@withContext // Task paused until user clicks Approve in UI
                     }
 
                     // 3. Execution
@@ -376,6 +542,7 @@ class AgentLoop(
                     val startTime = System.currentTimeMillis()
                     val result = toolExecutor.execute(toolCall.name, parsedArgs, domain)
                     val duration = System.currentTimeMillis() - startTime
+                    executedToolCount++
 
                     // Record citations for browser work
                     val currentUrl = browserController.getCurrentUrl().data.orEmpty()
@@ -513,16 +680,24 @@ class AgentLoop(
             )
             taskDao.updateTask(currentTask)
         } catch (e: Exception) {
-            val isQuotaError = e.message?.contains("429") == true || e.message?.contains("quota", ignoreCase = true) == true
-            if (isQuotaError) {
+            val isRateLimit = ProviderErrors.isRateLimitError(e)
+            if (isRateLimit) {
                 onPresenceChange(PipelinePresence.PROVIDER_LIMIT_REACHED)
             }
-            // The card shows ONE short human summary; the full raw provider
-            // text is preserved in the audit trail as a step, never printed
-            // raw (and never twice) on the task card.
-            val summary = com.example.nova.ai.ProviderErrors.errorSummary(e)
+            // The card shows ONE short human summary. Rate limits (429 —
+            // e.g. OpenRouter's free-models-per-day cap) get the dedicated
+            // plain-language summary; everything else goes through the
+            // nested-JSON drill-down summarizer. The audit-trail step gets
+            // the SAME human summary (fix round 2, Defect E) — raw provider
+            // JSON no longer appears in steps either.
+            val summary = if (isRateLimit) {
+                ProviderErrors.RATE_LIMIT_SUMMARY
+            } else {
+                ProviderErrors.errorSummary(e)
+            }
             // Learn from the failure: a deduplicated lesson in Lessons.md,
-            // read back into future tasks' context.
+            // read back into future tasks' context. A 429 classifies as
+            // PROVIDER_LIMIT in LessonsStore.
             lessonsStore.recordLesson(
                 goal = task.title,
                 failedStep = lastFailedStep.ifBlank { "provider request (step $stepNumber)" },
@@ -535,7 +710,7 @@ class AgentLoop(
                     stepNumber = stepNumber,
                     toolName = "provider_request",
                     argumentsJson = "",
-                    resultJson = (e.message ?: e.toString()).take(2000),
+                    resultJson = summary,
                     status = "FAILED"
                 )
             } catch (ignored: Exception) {}
@@ -551,6 +726,12 @@ class AgentLoop(
             // the task is only PAUSED (manual control / waiting approval) the
             // mode that describes that state is left untouched.
             val terminal = currentTask.status in listOf("COMPLETED", "FAILED", "CANCELLED", "SAFETY_STOPPED")
+            if (terminal) {
+                // The pause is over for good: drop the pending approval
+                // class (remembered grants intentionally survive — they
+                // belong to this task, e.g. across a user retry).
+                pendingApprovalClasses.remove(taskId)
+            }
             if (terminal && browserController.controlMode.value in listOf(
                     BrowserControlMode.AGENT_ACTIVE,
                     BrowserControlMode.WAITING_APPROVAL

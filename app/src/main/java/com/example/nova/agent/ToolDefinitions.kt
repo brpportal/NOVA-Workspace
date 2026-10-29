@@ -158,7 +158,7 @@ object ToolDefinitions {
         ),
         AIToolDefinition(
             name = "scroll",
-            description = "Scrolls the browser viewport by horizontal (x) and vertical (y) pixel offsets.",
+            description = "Scrolls the browser viewport by horizontal (x) and vertical (y) pixel offsets. Prefer scroll_down / scroll_up (page-based, they report the new scroll position) for reading pages.",
             parametersSchemaJson = """
             {
                 "type": "object",
@@ -167,6 +167,45 @@ object ToolDefinitions {
                     "dy": { "type": "integer", "description": "Vertical scroll offset" }
                 },
                 "required": ["dx", "dy"]
+            }
+            """.trimIndent()
+        ),
+        AIToolDefinition(
+            name = "scroll_down",
+            description = "Scrolls down to read more of the page — the normal way to work through long pages and feeds. Moves `pages` screens (default 1, fractions like 0.5 allowed) with a small overlap so no content is skipped; a fresh observation is attached automatically after scrolling. The result reports the new scroll position (~% down) and whether more content exists below — when it says the bottom is reached, stop scrolling. Alternatively pass `pixels` for an exact pixel amount.",
+            parametersSchemaJson = """
+            {
+                "type": "object",
+                "properties": {
+                    "pages": { "type": "number", "description": "How many screens to move down (default 1, e.g. 0.5 or 2)" },
+                    "pixels": { "type": "integer", "description": "Exact pixel amount instead of pages (optional)" }
+                }
+            }
+            """.trimIndent()
+        ),
+        AIToolDefinition(
+            name = "scroll_up",
+            description = "Scrolls up by `pages` screens (default 1, fractions allowed) or an exact `pixels` amount. The result reports the new scroll position. A fresh observation is attached automatically after scrolling.",
+            parametersSchemaJson = """
+            {
+                "type": "object",
+                "properties": {
+                    "pages": { "type": "number", "description": "How many screens to move up (default 1, e.g. 0.5 or 2)" },
+                    "pixels": { "type": "integer", "description": "Exact pixel amount instead of pages (optional)" }
+                }
+            }
+            """.trimIndent()
+        ),
+        AIToolDefinition(
+            name = "scroll_to_element",
+            description = "Scrolls the element with the given observation index into the centre of the viewport and re-observes the page, so an off-screen element from the latest observe_page can be seen and acted on with fresh coordinates. Use the index from the most recent observation.",
+            parametersSchemaJson = """
+            {
+                "type": "object",
+                "properties": {
+                    "index": { "type": "integer", "description": "Element index from the latest observe_page" }
+                },
+                "required": ["index"]
             }
             """.trimIndent()
         ),

@@ -129,6 +129,60 @@ class OpenAICompatibleProvider(
             return result.distinctBy { it.id }.sortedBy { it.id }
         }
 
+        /**
+         * Parses a chat-completions response body into an [AIResponse].
+         * Pure (no I/O) so it is unit-testable with recorded payloads.
+         *
+         * An HTTP-200 body with no usable model output — missing/empty
+         * `choices`, a choice without a `message`, or a message with
+         * neither text nor tool calls — throws
+         * [ProviderEmptyResponseException] instead of leaking org.json's
+         * raw "No value for choices" exception or silently producing a
+         * hollow empty response: free router tiers answer like this under
+         * load, and the agent loop retries those (see AgentLoop).
+         */
+        fun parseChatCompletion(body: String): AIResponse {
+            val json = try {
+                JSONObject(body)
+            } catch (e: Exception) {
+                throw ProviderEmptyResponseException("Provider returned an unreadable response body")
+            }
+            val choices = json.optJSONArray("choices")
+                ?: throw ProviderEmptyResponseException("Provider returned no choices")
+            if (choices.length() == 0) {
+                throw ProviderEmptyResponseException("Provider returned no choices")
+            }
+            val firstChoice = choices.optJSONObject(0)
+                ?: throw ProviderEmptyResponseException("Provider returned an empty choice")
+            val messageObj = firstChoice.optJSONObject("message")
+                ?: throw ProviderEmptyResponseException("Provider returned a choice without a message")
+            val text = messageObj.optString("content", "").takeIf { it.isNotBlank() }
+            val finishReason = firstChoice.optString("finish_reason", "stop")
+
+            val toolCalls = mutableListOf<AIToolCall>()
+            val tcArr = messageObj.optJSONArray("tool_calls")
+            if (tcArr != null) {
+                for (i in 0 until tcArr.length()) {
+                    val tc = tcArr.optJSONObject(i) ?: continue
+                    val fn = tc.optJSONObject("function") ?: continue
+                    val name = fn.optString("name")
+                    if (name.isBlank()) continue
+                    toolCalls.add(
+                        AIToolCall(
+                            id = tc.optString("id", UUID.randomUUID().toString()),
+                            name = name,
+                            argumentsJson = fn.optString("arguments", "{}")
+                        )
+                    )
+                }
+            }
+
+            if (text == null && toolCalls.isEmpty()) {
+                throw ProviderEmptyResponseException("Provider returned an empty message (no text, no tool calls)")
+            }
+            return AIResponse(text = text, toolCalls = toolCalls, finishReason = finishReason)
+        }
+
         private fun isFreeModel(item: JSONObject, id: String): Boolean {
             if (id.endsWith(":free")) return true
             val pricing = item.optJSONObject("pricing") ?: return false
@@ -267,32 +321,7 @@ class OpenAICompatibleProvider(
             if (!response.isSuccessful) {
                 throw IllegalStateException("API Error (${response.code}): $body")
             }
-            val json = JSONObject(body)
-            val choices = json.getJSONArray("choices")
-            if (choices.length() == 0) return@use AIResponse(text = null)
-
-            val firstChoice = choices.getJSONObject(0)
-            val messageObj = firstChoice.getJSONObject("message")
-            val text = messageObj.optString("content", "").takeIf { it.isNotBlank() }
-            val finishReason = firstChoice.optString("finish_reason", "stop")
-
-            val toolCalls = mutableListOf<AIToolCall>()
-            if (messageObj.has("tool_calls")) {
-                val tcArr = messageObj.getJSONArray("tool_calls")
-                for (i in 0 until tcArr.length()) {
-                    val tc = tcArr.getJSONObject(i)
-                    val fn = tc.getJSONObject("function")
-                    toolCalls.add(
-                        AIToolCall(
-                            id = tc.optString("id", UUID.randomUUID().toString()),
-                            name = fn.getString("name"),
-                            argumentsJson = fn.getString("arguments")
-                        )
-                    )
-                }
-            }
-
-            AIResponse(text = text, toolCalls = toolCalls, finishReason = finishReason)
+            parseChatCompletion(body)
         }
     }
 

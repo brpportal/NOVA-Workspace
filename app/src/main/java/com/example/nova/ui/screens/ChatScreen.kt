@@ -312,15 +312,33 @@ fun ChatScreen(
                                 style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface),
                                 maxLines = 1
                             )
+                            if (runningTask.status == "WAITING_APPROVAL" && !runningTask.pendingApprovalArgumentsJson.isNullOrBlank()) {
+                                Text(
+                                    text = runningTask.pendingApprovalArgumentsJson!!,
+                                    style = MaterialTheme.typography.labelSmall.copy(color = StoneMuted),
+                                    maxLines = 3
+                                )
+                            }
                         }
                         if (runningTask.status == "WAITING_APPROVAL") {
+                            // Decide right here (fix round 2, Defect D) —
+                            // no trip to the Tasks page required.
                             Button(
-                                onClick = { onNavigateToScreen(NovaScreen.TASKS) },
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                onClick = { repository.approveTask(runningTask.id, "ALLOW_ONCE") },
+                                colors = ButtonDefaults.buttonColors(containerColor = WarmSuccess),
                                 shape = RoundedCornerShape(20.dp),
-                                modifier = Modifier.height(32.dp).testTag("review_task_button")
+                                modifier = Modifier.height(32.dp).testTag("chat_approve_button")
                             ) {
-                                Text("Review", fontSize = 12.sp, color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.SemiBold)
+                                Text("Approve", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                            }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Button(
+                                onClick = { repository.rejectTask(runningTask.id) },
+                                colors = ButtonDefaults.buttonColors(containerColor = WarmError),
+                                shape = RoundedCornerShape(20.dp),
+                                modifier = Modifier.height(32.dp).testTag("chat_deny_button")
+                            ) {
+                                Text("Deny", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
                             }
                         } else {
                             IconButton(
@@ -329,6 +347,63 @@ fun ChatScreen(
                             ) {
                                 Icon(Icons.Default.Stop, contentDescription = "Cancel task", tint = WarmError)
                             }
+                        }
+                    }
+                }
+            }
+
+            // Global approval bar (fix round 2, Defect D): a task waiting
+            // for approval that is NOT this conversation's running task
+            // (e.g. a scheduled run) can be decided from Chat too — the
+            // pending state is the same repository flow everywhere.
+            val otherApprovalTask = activeTasks.firstOrNull {
+                it.status == "WAITING_APPROVAL" && it.id != runningTask?.id
+            }
+            if (otherApprovalTask != null) {
+                Surface(
+                    color = WarmWarning.copy(alpha = 0.10f),
+                    shape = RoundedCornerShape(16.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, WarmWarning.copy(alpha = 0.5f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                        .testTag("chat_global_approval_bar")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Approval needed: ${otherApprovalTask.title}",
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface),
+                                maxLines = 1
+                            )
+                            Text(
+                                text = otherApprovalTask.pendingApprovalArgumentsJson ?: "Action: ${otherApprovalTask.pendingApprovalToolName}",
+                                style = MaterialTheme.typography.labelSmall.copy(color = StoneMuted),
+                                maxLines = 3
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = { repository.approveTask(otherApprovalTask.id, "ALLOW_ONCE") },
+                            colors = ButtonDefaults.buttonColors(containerColor = WarmSuccess),
+                            shape = RoundedCornerShape(20.dp),
+                            modifier = Modifier.height(32.dp).testTag("chat_global_approve_button")
+                        ) {
+                            Text("Approve", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Button(
+                            onClick = { repository.rejectTask(otherApprovalTask.id) },
+                            colors = ButtonDefaults.buttonColors(containerColor = WarmError),
+                            shape = RoundedCornerShape(20.dp),
+                            modifier = Modifier.height(32.dp).testTag("chat_global_deny_button")
+                        ) {
+                            Text("Deny", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }

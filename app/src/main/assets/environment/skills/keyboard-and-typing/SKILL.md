@@ -28,6 +28,15 @@ the form never saw. These rules make typed text real.
    wrong for multi-field forms — fill everything first, then click the
    submit control by index.
 
+## Fields below the fold
+
+`type_text` scrolls its target into view itself. But when a form is
+long, do not jump blind from field to field: `scroll_down` chunk by
+chunk and observe, so you see the fields (and any hints or errors)
+between them; or `scroll_to_element(index)` to bring a known field
+into view first. The observation's "Scroll: ~N% down" line tells you
+where on the page you are.
+
 ## Verify the value stuck
 
 After typing, the next observation echoes each field's current value.

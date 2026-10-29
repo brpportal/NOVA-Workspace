@@ -1,9 +1,17 @@
 package com.example.nova.browser
 
+import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.net.http.SslError
+import android.view.ViewGroup
+import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,8 +28,63 @@ import java.net.URI
 import java.util.Locale
 import kotlin.coroutines.resume
 
-class BrowserController {
+/**
+ * The ONE browser controller for the whole app.
+ *
+ * Fix round 2 (Defect A): this used to be created per-NovaRepository
+ * (MainActivity built its own repository, the WorkManager worker used the
+ * getInstance singleton — each with its OWN controller), and the only
+ * WebView in existence was the one BrowserScreen composed. A chat-launched
+ * task therefore drove a controller with no WebView at all: navigate /
+ * reload / screenshot failed with "WebView not available", while the
+ * JS-based reads substituted "{}" and reported SUCCESS with empty data.
+ *
+ * Now: [getInstance] is the single shared controller (wired into
+ * NovaRepository), it OWNS a WebView created from the application context
+ * on the main thread, created lazily the first time anything needs the
+ * browser — no Browser tab visit required. The Browser screen re-parents
+ * that very WebView into its container ([attachToDisplay] /
+ * [detachFromDisplay]) so the user watches the page the agent drives, and
+ * detaching never destroys it.
+ */
+class BrowserController(private val appContext: Context? = null) {
+
+    companion object {
+        /** Blocked-result message for agent browser actions under manual control. */
+        const val USER_IN_CONTROL_MESSAGE = "User is in control of the browser"
+
+        @Volatile
+        private var INSTANCE: BrowserController? = null
+
+        fun getInstance(context: Context): BrowserController {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: BrowserController(context.applicationContext).also { INSTANCE = it }
+            }
+        }
+    }
+
     private var webViewRef: WeakReference<WebView>? = null
+
+    /** Strong reference to the controller-owned WebView (survives screen detach). */
+    private var ownedWebView: WebView? = null
+
+    /**
+     * Invoked from the WebViewClient on every finished page load with
+     * (title, url) for non-blank pages. NovaRepository wires this to its
+     * browsing-history table so history works for agent-driven loads too,
+     * not just loads that happened while the Browser screen was open.
+     */
+    @Volatile
+    var onPageFinishedListener: ((title: String, url: String) -> Unit)? = null
+
+    /** Most recent [observePage] result — click/type targets resolve against it. */
+    @Volatile
+    var lastObservation: PageObservation? = null
+        private set
+
+    /** Cache key (url + DOM size) of [lastObservation] for the unchanged-page shortcut. */
+    @Volatile
+    private var lastObservationKey: String? = null
 
     private val _controlMode = MutableStateFlow(BrowserControlMode.STANDBY)
     val controlMode: StateFlow<BrowserControlMode> = _controlMode.asStateFlow()
@@ -62,6 +125,168 @@ class BrowserController {
 
     fun unbindWebView() {
         webViewRef = null
+    }
+
+    // --- OWNED WEBVIEW LIFECYCLE (Defect A) ---
+
+    /**
+     * Returns the live WebView, creating the controller-owned one first if
+     * needed. MUST be called on the main thread. Returns null only when the
+     * controller was built without a context (unit tests) and nothing was
+     * bound via [bindWebView].
+     */
+    private fun obtainWebViewLocked(): WebView? {
+        webViewRef?.get()?.let { return it }
+        val ctx = appContext ?: return null
+        val wv = createConfiguredWebView(ctx)
+        ownedWebView = wv
+        webViewRef = WeakReference(wv)
+        // Give the offscreen view a real viewport so layout-dependent DOM
+        // reads (bounding rects, visibility) and screenshots have pixels to
+        // work with before the Browser screen ever attaches it.
+        if (wv.width == 0 || wv.height == 0) {
+            val widthSpec = android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY)
+            val heightSpec = android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
+            wv.measure(widthSpec, heightSpec)
+            wv.layout(0, 0, 1080, 1920)
+        }
+        val initialUrl = _currentTabState.value.url
+        if (initialUrl.isNotBlank()) {
+            wv.loadUrl(initialUrl)
+        }
+        return wv
+    }
+
+    /** Suspend entry point: guarantees a live WebView on the main thread. */
+    suspend fun ensureWebView(): Boolean = withContext(Dispatchers.Main) {
+        obtainWebViewLocked() != null
+    }
+
+    /** The WebView for agent actions: ensures existence, null only if impossible. */
+    private suspend fun liveWebView(): WebView? = withContext(Dispatchers.Main) {
+        obtainWebViewLocked()
+    }
+
+    /**
+     * Parents the shared WebView into the Browser screen's container so the
+     * user watches the exact page the agent drives. Main thread only.
+     */
+    fun attachToDisplay(container: ViewGroup) {
+        val wv = obtainWebViewLocked() ?: return
+        if (wv.parent === container) return
+        (wv.parent as? ViewGroup)?.removeView(wv)
+        container.addView(
+            wv,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+    }
+
+    /**
+     * Removes the shared WebView from its display container WITHOUT
+     * destroying it — the agent keeps its page when the user leaves the
+     * Browser screen. Main thread only.
+     */
+    fun detachFromDisplay(container: ViewGroup) {
+        val wv = webViewRef?.get() ?: return
+        if (wv.parent === container) {
+            container.removeView(wv)
+        }
+    }
+
+    /** The element with [index] from the most recent observation, or null. */
+    fun observedElement(index: Int): PageElement? =
+        lastObservation?.elements?.firstOrNull { it.index == index }
+
+    /** Drops the observation cache (page is about to change). */
+    fun invalidateObservationCache() {
+        lastObservationKey = null
+    }
+
+    /**
+     * Builds the shared WebView with the exact settings and clients the
+     * Browser screen used to install on its own throwaway instance, so
+     * behaviour (tab state, progress, SSL handling) is identical whether or
+     * not the screen is open.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createConfiguredWebView(ctx: Context): WebView {
+        val wv = WebView(ctx)
+        wv.layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        wv.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            useWideViewPort = true
+            loadWithOverviewMode = true
+            builtInZoomControls = true
+            displayZoomControls = false
+            allowFileAccess = false
+            allowContentAccess = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 Spark/1.0"
+        }
+        wv.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                updateTabState {
+                    it.copy(
+                        isLoading = true,
+                        url = url ?: it.url,
+                        canGoBack = view?.canGoBack() == true,
+                        canGoForward = view?.canGoForward() == true,
+                        isSecure = url?.startsWith("https://") == true
+                    )
+                }
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                val title = view?.title ?: "Webpage"
+                updateTabState {
+                    it.copy(
+                        isLoading = false,
+                        title = title,
+                        url = url ?: it.url,
+                        canGoBack = view?.canGoBack() == true,
+                        canGoForward = view?.canGoForward() == true
+                    )
+                }
+                if (!url.isNullOrBlank() && url != "about:blank") {
+                    try {
+                        onPageFinishedListener?.invoke(title, url)
+                    } catch (ignored: Exception) {}
+                }
+            }
+
+            override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
+                handler?.cancel()
+                updateTabState {
+                    it.copy(
+                        isSecure = false,
+                        sslErrorDesc = "The webpage certificate could not be verified (${error?.primaryError}). Connection cancelled for your protection."
+                    )
+                }
+            }
+        }
+        wv.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                updateTabState {
+                    it.copy(progress = newProgress, isLoading = newProgress < 100)
+                }
+            }
+
+            override fun onReceivedTitle(view: WebView?, title: String?) {
+                if (!title.isNullOrBlank()) {
+                    updateTabState { it.copy(title = title) }
+                }
+            }
+        }
+        return wv
     }
 
     fun updateTabState(update: (BrowserTabState) -> BrowserTabState) {
@@ -182,62 +407,91 @@ class BrowserController {
     // --- AUTOMATION ACTIONS FOR AGENT LOOP ---
 
     suspend fun getCurrentUrl(): BrowserActionResult = withContext(Dispatchers.Main) {
-        val url = webViewRef?.get()?.url ?: _currentTabState.value.url
+        val wv = obtainWebViewLocked()
+        val url = wv?.url ?: _currentTabState.value.url
         BrowserActionResult(success = true, message = "Current URL retrieved", data = url)
     }
 
     suspend fun getPageTitle(): BrowserActionResult = withContext(Dispatchers.Main) {
-        val title = webViewRef?.get()?.title ?: _currentTabState.value.title
+        val wv = obtainWebViewLocked()
+        val title = wv?.title ?: _currentTabState.value.title
         BrowserActionResult(success = true, message = "Page title retrieved", data = title)
     }
 
     suspend fun navigate(url: String, timeoutMs: Long = 15000): BrowserActionResult {
         if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
-            return BrowserActionResult(false, "Action blocked: Browser is under MANUAL CONTROL by user.")
+            return BrowserActionResult(false, "$USER_IN_CONTROL_MESSAGE — the agent cannot navigate until control is handed back.")
         }
         val safe = sanitizeUrl(url)
         return withContext(Dispatchers.Main) {
-            val wv = webViewRef?.get() ?: return@withContext BrowserActionResult(false, "WebView not available")
+            val wv = obtainWebViewLocked() ?: return@withContext BrowserActionResult(false, "WebView not available")
+            invalidateObservationCache()
             wv.loadUrl(safe)
             BrowserActionResult(success = true, message = "Navigated to $safe", data = safe)
         }
     }
 
-    suspend fun goBackAction(): BrowserActionResult = withContext(Dispatchers.Main) {
-        val wv = webViewRef?.get() ?: return@withContext BrowserActionResult(false, "WebView not available")
-        if (wv.canGoBack()) {
-            wv.goBack()
-            BrowserActionResult(success = true, message = "Navigated back")
-        } else {
-            BrowserActionResult(false, "Cannot navigate back (history stack is empty)")
+    suspend fun goBackAction(): BrowserActionResult {
+        if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
+            return BrowserActionResult(false, "$USER_IN_CONTROL_MESSAGE — the agent cannot navigate until control is handed back.")
+        }
+        return withContext(Dispatchers.Main) {
+            val wv = obtainWebViewLocked() ?: return@withContext BrowserActionResult(false, "WebView not available")
+            if (wv.canGoBack()) {
+                invalidateObservationCache()
+                wv.goBack()
+                BrowserActionResult(success = true, message = "Navigated back")
+            } else {
+                BrowserActionResult(false, "Cannot navigate back (history stack is empty)")
+            }
         }
     }
 
-    suspend fun goForwardAction(): BrowserActionResult = withContext(Dispatchers.Main) {
-        val wv = webViewRef?.get() ?: return@withContext BrowserActionResult(false, "WebView not available")
-        if (wv.canGoForward()) {
-            wv.goForward()
-            BrowserActionResult(success = true, message = "Navigated forward")
-        } else {
-            BrowserActionResult(false, "Cannot navigate forward (history stack is empty)")
+    suspend fun goForwardAction(): BrowserActionResult {
+        if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
+            return BrowserActionResult(false, "$USER_IN_CONTROL_MESSAGE — the agent cannot navigate until control is handed back.")
+        }
+        return withContext(Dispatchers.Main) {
+            val wv = obtainWebViewLocked() ?: return@withContext BrowserActionResult(false, "WebView not available")
+            if (wv.canGoForward()) {
+                invalidateObservationCache()
+                wv.goForward()
+                BrowserActionResult(success = true, message = "Navigated forward")
+            } else {
+                BrowserActionResult(false, "Cannot navigate forward (history stack is empty)")
+            }
         }
     }
 
-    /** Polls document.readyState until "complete" or the timeout elapses. */
+    /**
+     * Polls document.readyState until "complete" or the timeout elapses.
+     * Honest results (fix round 2): a missing WebView, or a readyState that
+     * never becomes readable, is an ERROR — the old code reported SUCCESS
+     * with "readyState=unknown" for a browser that did not exist.
+     */
     suspend fun waitForLoad(timeoutMs: Long = 8000): BrowserActionResult {
+        if (liveWebView() == null) {
+            return BrowserActionResult(false, "WebView not available — the browser could not be started")
+        }
         val deadline = System.currentTimeMillis() + timeoutMs
         var state = ""
         while (System.currentTimeMillis() < deadline) {
-            val raw = evaluateJs("document.readyState") ?: break
+            val raw = evaluateJs("document.readyState")
+            if (raw == null) {
+                return BrowserActionResult(false, "WebView not available — the page state could not be read")
+            }
             state = unescapeJsString(raw)
             if (state == "complete") {
                 return BrowserActionResult(success = true, message = "Page finished loading (readyState=complete)")
             }
             delay(250)
         }
+        if (state.isBlank()) {
+            return BrowserActionResult(false, "Page load state could not be determined (no readable readyState)")
+        }
         return BrowserActionResult(
             success = true,
-            message = "Waited ${timeoutMs}ms for page load (readyState=${state.ifBlank { "unknown" }})"
+            message = "Waited ${timeoutMs}ms for page load (readyState=$state)"
         )
     }
 
@@ -247,17 +501,67 @@ class BrowserController {
      * a stable [PageElement.index] (stamped into the DOM as data-spark-idx)
      * that click_element / type_text act on. Pure parsing lives in
      * [PageElementsParser].
+     *
+     * Loop economy (fix round 2): a cheap probe (URL + DOM size) keys the
+     * last observation — when the page is unchanged, the cached observation
+     * is returned with `fromCache = true` instead of re-extracting.
+     *
+     * Honesty (fix round 2): when no live page can be read at all, the
+     * returned observation carries [PageObservation.error] instead of a
+     * plausible-looking empty SUCCESS ("URL: unknown").
      */
     suspend fun observePage(): PageObservation {
+        if (liveWebView() == null) {
+            return PageObservation(error = "WebView not available — the browser could not be started")
+        }
         waitForLoad(3500)
-        val raw = evaluateJs(OBSERVE_JS) ?: "{}"
-        return PageElementsParser.parse(unescapeJsString(raw))
+
+        // Cheap change probe before paying for a full extraction.
+        val probeRaw = evaluateJs(PROBE_JS)
+        if (probeRaw != null) {
+            try {
+                val probe = JSONObject(unescapeJsString(probeRaw))
+                val key = PageElementsParser.cacheKey(
+                    probe.optString("url"),
+                    probe.optInt("domLength", -1)
+                )
+                val cached = lastObservation
+                if (cached != null && key == lastObservationKey && probe.optInt("domLength", -1) >= 0) {
+                    return cached.copy(fromCache = true)
+                }
+            } catch (ignored: Exception) {}
+        }
+
+        val raw = evaluateJs(OBSERVE_JS)
+            ?: return PageObservation(error = "Browser page not loaded yet — the page could not be read")
+        val observation = PageElementsParser.parse(unescapeJsString(raw))
+        if (observation.url.isBlank() && observation.elements.isEmpty() && observation.textExcerpt.isBlank()) {
+            return PageObservation(error = "Browser page not loaded yet — no page content could be read")
+        }
+        lastObservation = observation
+        // Refresh the cache key from the extracted page itself so the next
+        // probe compares against what was actually observed.
+        val probeRaw2 = evaluateJs(PROBE_JS)
+        if (probeRaw2 != null) {
+            try {
+                val probe = JSONObject(unescapeJsString(probeRaw2))
+                lastObservationKey = PageElementsParser.cacheKey(
+                    probe.optString("url"),
+                    probe.optInt("domLength", -1)
+                )
+            } catch (ignored: Exception) {
+                lastObservationKey = null
+            }
+        } else {
+            lastObservationKey = null
+        }
+        return observation
     }
 
     /** Clicks the element with the given observation index. */
     suspend fun clickElement(index: Int): BrowserActionResult {
         if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
-            return BrowserActionResult(false, "Blocked: Manual control active.")
+            return BrowserActionResult(false, "$USER_IN_CONTROL_MESSAGE — the agent cannot act until control is handed back.")
         }
         animateCursorToElement(index)
         val js = """
@@ -280,6 +584,7 @@ class BrowserController {
         val raw = evaluateJs(js) ?: "{}"
         val clean = unescapeJsString(raw)
         val success = clean.contains("\"success\":true")
+        if (success) invalidateObservationCache()
         logAction(if (success) "AI clicked element [$index]" else "AI failed click on element [$index]")
         delay(100)
         hideCursor()
@@ -299,7 +604,7 @@ class BrowserController {
      */
     suspend fun typeText(index: Int, text: String, clearFirst: Boolean = true, submit: Boolean = false): BrowserActionResult {
         if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
-            return BrowserActionResult(false, "Blocked: Manual control active.")
+            return BrowserActionResult(false, "$USER_IN_CONTROL_MESSAGE — the agent cannot act until control is handed back.")
         }
         showKeystrokes(text)
         val escapedText = JSONObject.quote(text)
@@ -346,6 +651,7 @@ class BrowserController {
         val raw = evaluateJs(js) ?: "{}"
         val clean = unescapeJsString(raw)
         val success = clean.contains("\"success\":true")
+        if (success && submit) invalidateObservationCache()
         logAction(if (success) "AI typed into element [$index]: \"$text\"" else "AI failed typing into element [$index]")
         delay(300)
         hideKeystrokes()
@@ -359,7 +665,7 @@ class BrowserController {
     /** Coordinate fallback: taps whatever element is at viewport (x, y). */
     suspend fun tapAt(x: Int, y: Int): BrowserActionResult {
         if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
-            return BrowserActionResult(false, "Blocked: Manual control active.")
+            return BrowserActionResult(false, "$USER_IN_CONTROL_MESSAGE — the agent cannot act until control is handed back.")
         }
         updateCursor(x.toFloat(), y.toFloat(), isClicking = false)
         delay(120)
@@ -383,6 +689,7 @@ class BrowserController {
         val raw = evaluateJs(js) ?: "{}"
         val clean = unescapeJsString(raw)
         val success = clean.contains("\"success\":true")
+        if (success) invalidateObservationCache()
         logAction(if (success) "AI tapped at ($x, $y)" else "AI failed tap at ($x, $y)")
         delay(100)
         hideCursor()
@@ -418,10 +725,16 @@ class BrowserController {
         }
     }
 
-    suspend fun reloadAction(): BrowserActionResult = withContext(Dispatchers.Main) {
-        val wv = webViewRef?.get() ?: return@withContext BrowserActionResult(false, "WebView not available")
-        wv.reload()
-        BrowserActionResult(success = true, message = "Page reloaded")
+    suspend fun reloadAction(): BrowserActionResult {
+        if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
+            return BrowserActionResult(false, "$USER_IN_CONTROL_MESSAGE — the agent cannot reload until control is handed back.")
+        }
+        return withContext(Dispatchers.Main) {
+            val wv = obtainWebViewLocked() ?: return@withContext BrowserActionResult(false, "WebView not available")
+            invalidateObservationCache()
+            wv.reload()
+            BrowserActionResult(success = true, message = "Page reloaded")
+        }
     }
 
     suspend fun getVisibleText(maxChars: Int = 8000): BrowserActionResult {
@@ -434,7 +747,8 @@ class BrowserController {
                 }
             })();
         """.trimIndent()
-        val raw = evaluateJs(js) ?: ""
+        val raw = evaluateJs(js)
+            ?: return BrowserActionResult(false, "WebView not available — no page text could be read")
         val clean = unescapeJsString(raw)
         return BrowserActionResult(success = true, message = "Extracted visible page text", data = clean)
     }
@@ -462,14 +776,15 @@ class BrowserController {
                 }
             })();
         """.trimIndent()
-        val res = evaluateJs(js) ?: "{}"
+        val res = evaluateJs(js)
+            ?: return BrowserActionResult(false, "WebView not available — element query could not run")
         val clean = unescapeJsString(res)
         return BrowserActionResult(success = clean.contains("\"found\":true"), message = "Element query executed", data = clean)
     }
 
     suspend fun click(selector: String): BrowserActionResult {
         if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
-            return BrowserActionResult(false, "Blocked: Manual control active.")
+            return BrowserActionResult(false, "$USER_IN_CONTROL_MESSAGE — the agent cannot act until control is handed back.")
         }
         val escaped = JSONObject.quote(selector)
         // First locate target coordinate to animate the virtual AI cursor
@@ -521,7 +836,7 @@ class BrowserController {
 
     suspend fun type(selector: String, text: String, clearFirst: Boolean = true): BrowserActionResult {
         if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
-            return BrowserActionResult(false, "Blocked: Manual control active.")
+            return BrowserActionResult(false, "$USER_IN_CONTROL_MESSAGE — the agent cannot act until control is handed back.")
         }
         showKeystrokes(text)
         val escapedSel = JSONObject.quote(selector)
@@ -750,8 +1065,117 @@ class BrowserController {
 
     suspend fun scroll(dx: Int, dy: Int): BrowserActionResult {
         val js = "window.scrollBy($dx, $dy);"
-        evaluateJs(js)
-        return BrowserActionResult(success = true, message = "Scrolled by ($dx, $dy)")
+        evaluateJs(js) ?: return BrowserActionResult(false, "WebView not available — could not scroll")
+        invalidateObservationCache()
+        val state = readScrollState()?.describe().orEmpty()
+        return BrowserActionResult(
+            success = true,
+            message = "Scrolled by ($dx, $dy)" + if (state.isNotBlank()) ". $state" else ""
+        )
+    }
+
+    /**
+     * First-class scrolling (scroll addition): moves [pages] screens down
+     * (fractional allowed, e.g. 0.5) with a ~10% overlap so chunked reading
+     * never skips a strip of the page. The result reports where the
+     * viewport landed and whether more content exists below — the agent's
+     * stopping signal on long/infinite pages.
+     */
+    suspend fun scrollDown(pages: Double = 1.0): BrowserActionResult = scrollByPages(direction = 1, pages = pages)
+
+    /** Mirror of [scrollDown] towards the top of the page. */
+    suspend fun scrollUp(pages: Double = 1.0): BrowserActionResult = scrollByPages(direction = -1, pages = pages)
+
+    private suspend fun scrollByPages(direction: Int, pages: Double): BrowserActionResult {
+        if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
+            return BrowserActionResult(false, "$USER_IN_CONTROL_MESSAGE — the agent cannot scroll until control is handed back.")
+        }
+        val safePages = pages.coerceIn(0.1, 10.0)
+        val before = readScrollState()
+        val js = """
+            (function() {
+                var step = Math.round(window.innerHeight * 0.9 * $safePages) * $direction;
+                window.scrollBy(0, step);
+                return 'ok';
+            })();
+        """.trimIndent()
+        evaluateJs(js) ?: return BrowserActionResult(false, "WebView not available — could not scroll")
+        delay(250)
+        invalidateObservationCache()
+        val after = readScrollState()
+        val state = after?.describe().orEmpty()
+        val dirWord = if (direction > 0) "down" else "up"
+        val moved = if (before != null && after != null) kotlin.math.abs(after.scrollY - before.scrollY) else -1
+        val message = when {
+            after == null -> "Scrolled $dirWord ${safePages} page(s)"
+            moved == 0 && direction > 0 && !after.canScrollDown ->
+                "Already at the bottom — scrolling down moved nothing. $state"
+            moved == 0 && direction < 0 && !after.canScrollUp ->
+                "Already at the top — scrolling up moved nothing. $state"
+            else -> "Scrolled $dirWord ${safePages} page(s). $state"
+        }
+        logAction("AI scrolled $dirWord ${safePages} page(s)")
+        return BrowserActionResult(success = true, message = message, data = state.ifBlank { null })
+    }
+
+    /**
+     * Scrolls the stamped element [index] (from the latest observation)
+     * into the centre of the viewport. AgentLoop treats this as a
+     * page-changing action, so a fresh observation follows automatically
+     * and the element can be clicked/typed into with current coordinates.
+     */
+    suspend fun scrollToElement(index: Int): BrowserActionResult {
+        if (_controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
+            return BrowserActionResult(false, "$USER_IN_CONTROL_MESSAGE — the agent cannot scroll until control is handed back.")
+        }
+        val js = """
+            (function() {
+                try {
+                    var el = document.querySelector('[data-spark-idx="$index"]');
+                    if (!el) return JSON.stringify({success: false, error: 'Element $index not found on this page. The page changed — call observe_page for fresh indices.'});
+                    el.scrollIntoView({behavior: 'instant', block: 'center'});
+                    var label = (el.innerText || el.getAttribute('aria-label') || el.placeholder || el.name || '').trim();
+                    return JSON.stringify({success: true, label: label.substring(0, 60)});
+                } catch(e) {
+                    return JSON.stringify({success: false, error: e.toString()});
+                }
+            })();
+        """.trimIndent()
+        val raw = evaluateJs(js) ?: return BrowserActionResult(false, "WebView not available — could not scroll to element [$index]")
+        val clean = unescapeJsString(raw)
+        val success = clean.contains("\"success\":true")
+        if (!success) {
+            return BrowserActionResult(false, "Failed to scroll to element [$index]", data = clean, error = clean)
+        }
+        delay(200)
+        invalidateObservationCache()
+        val label = try { JSONObject(clean).optString("label") } catch (e: Exception) { "" }
+        val state = readScrollState()?.describe().orEmpty()
+        logAction("AI scrolled element [$index] into view")
+        return BrowserActionResult(
+            success = true,
+            message = "Element [$index]${if (label.isNotBlank()) " \"$label\"" else ""} scrolled into view." +
+                if (state.isNotBlank()) " $state" else "",
+            data = clean
+        )
+    }
+
+    /** Reads the current viewport position, or null when no page can be read. */
+    suspend fun readScrollState(): ScrollState? {
+        val raw = evaluateJs(SCROLL_STATE_JS) ?: return null
+        return try {
+            val obj = JSONObject(unescapeJsString(raw))
+            val pageHeight = obj.optInt("pageHeight", 0)
+            val viewportHeight = obj.optInt("viewportHeight", 0)
+            if (pageHeight <= 0 || viewportHeight <= 0) null
+            else ScrollState(
+                scrollY = obj.optInt("scrollY", 0).coerceAtLeast(0),
+                viewportHeight = viewportHeight,
+                pageHeight = pageHeight
+            )
+        } catch (e: Exception) {
+            null
+        }
     }
 
     suspend fun getPageState(): BrowserActionResult {
@@ -776,13 +1200,28 @@ class BrowserController {
                 }
             })();
         """.trimIndent()
-        val raw = evaluateJs(js) ?: "{}"
+        val raw = evaluateJs(js)
+            ?: return BrowserActionResult(false, "WebView not available — page state could not be read")
         val clean = unescapeJsString(raw)
-        return BrowserActionResult(success = true, message = "Page state retrieved", data = clean)
+        // Honest results (fix round 2): the old code reported SUCCESS with
+        // data "{}" when the JS failed or never ran. A real state always
+        // carries the page URL; anything else is an error result.
+        val parsed = try { JSONObject(clean) } catch (e: Exception) { null }
+        val pageUrl = parsed?.optString("url").orEmpty()
+        val jsError = parsed?.optString("error").orEmpty()
+        return if (parsed == null || jsError.isNotBlank() || pageUrl.isBlank()) {
+            BrowserActionResult(
+                success = false,
+                message = "Page state unavailable${if (jsError.isNotBlank()) ": $jsError" else " — the browser page is not loaded"}",
+                data = clean
+            )
+        } else {
+            BrowserActionResult(success = true, message = "Page state retrieved", data = clean)
+        }
     }
 
     suspend fun takeScreenshot(destinationDir: File): BrowserActionResult = withContext(Dispatchers.Main) {
-        val wv = webViewRef?.get() ?: return@withContext BrowserActionResult(false, "WebView not available for capture")
+        val wv = obtainWebViewLocked() ?: return@withContext BrowserActionResult(false, "WebView not available for capture")
         try {
             val width = wv.width.takeIf { it > 0 } ?: 1080
             val height = wv.height.takeIf { it > 0 } ?: 1920
@@ -868,6 +1307,42 @@ class BrowserController {
     }
 
     /**
+     * Cheap page-identity probe for the observation cache: current URL and
+     * DOM size. Two probes with the same pair mean the page state the agent
+     * already observed — the full extraction can be skipped.
+     */
+    private val PROBE_JS = """
+        (function() {
+            try {
+                return JSON.stringify({
+                    url: window.location.href,
+                    domLength: document.documentElement ? document.documentElement.innerHTML.length : -1
+                });
+            } catch (e) {
+                return JSON.stringify({url: '', domLength: -1});
+            }
+        })();
+    """.trimIndent()
+
+    /** Viewport position probe: feeds [ScrollState] after scroll actions and observations. */
+    private val SCROLL_STATE_JS = """
+        (function() {
+            try {
+                return JSON.stringify({
+                    scrollY: Math.round(window.scrollY || window.pageYOffset || 0),
+                    viewportHeight: window.innerHeight || 0,
+                    pageHeight: Math.max(
+                        document.documentElement ? document.documentElement.scrollHeight : 0,
+                        document.body ? document.body.scrollHeight : 0
+                    )
+                });
+            } catch (e) {
+                return JSON.stringify({scrollY: 0, viewportHeight: 0, pageHeight: 0});
+            }
+        })();
+    """.trimIndent()
+
+    /**
      * DOM extraction for [observePage]: collects visible interactive
      * elements in document order, stamps each with data-spark-idx, and
      * returns URL/title/elements/text as a JSON string. Password values are
@@ -926,7 +1401,13 @@ class BrowserController {
                     url: window.location.href,
                     title: document.title || '',
                     elements: results,
-                    text: textExcerpt
+                    text: textExcerpt,
+                    scrollY: Math.round(window.scrollY || window.pageYOffset || 0),
+                    viewportHeight: window.innerHeight || 0,
+                    pageHeight: Math.max(
+                        document.documentElement ? document.documentElement.scrollHeight : 0,
+                        document.body ? document.body.scrollHeight : 0
+                    )
                 });
             } catch (e) {
                 return JSON.stringify({url: '', title: '', elements: [], text: ''});
@@ -937,7 +1418,9 @@ class BrowserController {
     private suspend fun evaluateJs(script: String, timeoutMs: Long = 5000): String? {
         return withTimeoutOrNull(timeoutMs) {
             withContext(Dispatchers.Main) {
-                val wv = webViewRef?.get() ?: return@withContext null
+                // Create the owned WebView on first use so agent work never
+                // depends on the Browser screen having been opened.
+                val wv = obtainWebViewLocked() ?: return@withContext null
                 suspendCancellableCoroutine { continuation ->
                     wv.evaluateJavascript(script) { result ->
                         if (continuation.isActive) {

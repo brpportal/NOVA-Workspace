@@ -48,9 +48,12 @@ Aim deliberately.
 Off-screen elements are marked "(off-screen, will scroll into view)" in
 the observation. `click_element` scrolls for you — trust it, then verify
 from the fresh observation that the page moved and the action landed.
-For coordinate taps, scroll first with `scroll`, observe again, and only
-then read coordinates: a tap aimed with pre-scroll coordinates hits
-whatever moved into that spot.
+When you want the element framed before acting (e.g. for a screenshot),
+use `scroll_to_element(index)`: it centres the element and re-observes.
+For coordinate taps, scroll first (`scroll_down` / `scroll_up` move in
+screen-sized chunks and report the new position), observe again, and
+only then read coordinates: a tap aimed with pre-scroll coordinates
+hits whatever moved into that spot.
 
 ## Hover, long-press, drag — the honest limits
 

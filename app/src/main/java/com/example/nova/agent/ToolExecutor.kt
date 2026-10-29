@@ -31,6 +31,20 @@ class ToolExecutor(
         currentWebDomain: String? = null
     ): ToolExecutionResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
+        // Single-controller rule (fix round 2, Defect B): while the USER
+        // holds the browser, agent browser tools do not execute at all —
+        // they return one clear blocked result instead of acting on a page
+        // the user is driving. (When the AI holds it, the Browser screen's
+        // touch shield is the mirror-image lock.)
+        if (toolName in AgentLoop.BROWSER_TOOL_NAMES &&
+            browserController.controlMode.value == com.example.nova.browser.BrowserControlMode.MANUAL_CONTROL
+        ) {
+            return@withContext ToolExecutionResult(
+                success = false,
+                output = "${BrowserController.USER_IN_CONTROL_MESSAGE} — agent browser tools are paused until control is handed back to the agent.",
+                error = BrowserController.USER_IN_CONTROL_MESSAGE
+            )
+        }
         try {
             when (toolName) {
                 // Browser tools
@@ -75,6 +89,28 @@ class ToolExecutor(
                     val res = browserController.scroll(dx, dy)
                     ToolExecutionResult(res.success, res.message, error = res.error)
                 }
+                "scroll_down" -> {
+                    // Pixel amount wins when given; otherwise whole/fractional pages.
+                    val res = if (arguments.has("pixels")) {
+                        browserController.scroll(0, arguments.getInt("pixels"))
+                    } else {
+                        browserController.scrollDown(arguments.optDouble("pages", 1.0))
+                    }
+                    ToolExecutionResult(res.success, res.message, error = res.error)
+                }
+                "scroll_up" -> {
+                    val res = if (arguments.has("pixels")) {
+                        browserController.scroll(0, -kotlin.math.abs(arguments.getInt("pixels")))
+                    } else {
+                        browserController.scrollUp(arguments.optDouble("pages", 1.0))
+                    }
+                    ToolExecutionResult(res.success, res.message, error = res.error)
+                }
+                "scroll_to_element" -> {
+                    val index = arguments.getInt("index")
+                    val res = browserController.scrollToElement(index)
+                    ToolExecutionResult(res.success, res.message, error = res.error)
+                }
                 "take_screenshot" -> {
                     val imagesDir = File(workspaceManager.rootDir, "Images")
                     val res = browserController.takeScreenshot(imagesDir)
@@ -87,7 +123,14 @@ class ToolExecutor(
                 }
                 "observe_page" -> {
                     val observation = browserController.observePage()
-                    ToolExecutionResult(true, observation.formatForModel())
+                    // Honest results: an observation that could not read a
+                    // real page is an ERROR, not a successful empty page.
+                    val obsError = observation.error
+                    if (obsError != null) {
+                        ToolExecutionResult(false, obsError, error = obsError)
+                    } else {
+                        ToolExecutionResult(true, observation.formatForModel())
+                    }
                 }
                 "click_element" -> {
                     val index = arguments.getInt("index")

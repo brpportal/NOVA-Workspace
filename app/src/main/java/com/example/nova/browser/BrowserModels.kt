@@ -83,19 +83,75 @@ data class PageElement(
     val inViewport: Boolean = true
 )
 
+/**
+ * Where the viewport sits on the page (scroll addition): [scrollY] is the
+ * current offset, [viewportHeight] one screen, [pageHeight] the full
+ * document height. Pure value math — the human/model-facing summary and
+ * the "is there more below" judgement live here so they are unit-testable
+ * without a WebView.
+ */
+data class ScrollState(
+    val scrollY: Int = 0,
+    val viewportHeight: Int = 0,
+    val pageHeight: Int = 0
+) {
+    /** True when content exists below the current viewport. */
+    val canScrollDown: Boolean
+        get() = pageHeight > 0 && viewportHeight > 0 && scrollY + viewportHeight < pageHeight - 8
+
+    /** True when the page is scrolled away from the top. */
+    val canScrollUp: Boolean
+        get() = scrollY > 8
+
+    /** Approximate position 0–100 (100 when the page fits on one screen). */
+    val percentDown: Int
+        get() {
+            val scrollable = pageHeight - viewportHeight
+            if (scrollable <= 0) return 100
+            return ((scrollY.toDouble() / scrollable) * 100).toInt().coerceIn(0, 100)
+        }
+
+    /** One-line summary for tool results and observations. Empty when no real metrics exist. */
+    fun describe(): String {
+        if (pageHeight <= 0 || viewportHeight <= 0) return ""
+        val tail = when {
+            canScrollDown -> "more content below — scroll_down to keep reading"
+            canScrollUp -> "at the bottom of the page"
+            else -> "whole page fits on one screen"
+        }
+        return "Scroll: ~$percentDown% down (y=${scrollY}px of ${pageHeight}px) — $tail"
+    }
+}
+
 /** A grounded snapshot of the current page for the agent's next decision. */
 data class PageObservation(
     val url: String = "",
     val title: String = "",
     val elements: List<PageElement> = emptyList(),
-    val textExcerpt: String = ""
+    val textExcerpt: String = "",
+    /** Viewport scroll position at observation time (0 when unknown). */
+    val scrollY: Int = 0,
+    val viewportHeight: Int = 0,
+    val pageHeight: Int = 0,
+    /** True when this is the cached copy of an unchanged page (fix round 2 loop economy). */
+    val fromCache: Boolean = false,
+    /** Set when no real page could be read at all — callers must treat this as an error, never as data. */
+    val error: String? = null
 ) {
+    /** Scroll metrics of this snapshot, for state summaries. */
+    val scrollState: ScrollState
+        get() = ScrollState(scrollY = scrollY, viewportHeight = viewportHeight, pageHeight = pageHeight)
     /** Compact text form fed to the model after browser actions. */
     fun formatForModel(maxElements: Int = 40, maxChars: Int = 6000): String {
         val sb = StringBuilder()
         sb.append("--- Page observation ---\n")
+        if (fromCache) {
+            sb.append("(page unchanged since the last observation — the indices and content below are still valid; act on them instead of observing again)\n")
+        }
         sb.append("URL: ").append(url.ifBlank { "unknown" }).append('\n')
         sb.append("Title: ").append(title.ifBlank { "(none)" }).append('\n')
+        val scrollLine = scrollState.describe()
+        if (scrollLine.isNotBlank()) sb.append(scrollLine).append('\n')
         if (elements.isEmpty()) {
             sb.append("Interactive elements: none found on this page (it may still be loading, or be canvas/image-only — use take_screenshot and tap(x, y) if needed).\n")
         } else {
