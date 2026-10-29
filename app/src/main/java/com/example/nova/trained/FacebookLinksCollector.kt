@@ -56,13 +56,17 @@ class FacebookLinksCollector(
         val results: List<FacebookProfileResult>,
         /** True when the chain was cut short (a Needs-you wait timed out). */
         val stoppedEarly: Boolean = false,
-        val stopReason: String? = null
+        val stopReason: String? = null,
+        /** True when the early stop was a LOGIN pause that timed out / was stopped — drives the task's final line. */
+        val stoppedForLogin: Boolean = false
     )
 
     /** Internal control-flow signal for "abort the whole chain now". */
     private class AbortRunException(
         val result: FacebookProfileResult?,
-        val reason: String
+        val reason: String,
+        /** True when this abort is a login wait that ended without a login. */
+        val stoppedForLogin: Boolean = false
     ) : Exception(reason)
 
     private data class Attempt(
@@ -75,7 +79,11 @@ class FacebookLinksCollector(
         val links: List<String>,
         val loginDetected: Boolean = false,
         val rendererDied: Boolean = false,
-        val restart: Boolean = false
+        val restart: Boolean = false,
+        /** Positive posts-area evidence seen during collection (gates NO_POSTS). */
+        val postsAreaRendered: Boolean = false,
+        /** How many discovery attempts were spent (diagnostics). */
+        val attemptsUsed: Int = 0
     )
 
     companion object {
@@ -84,6 +92,32 @@ class FacebookLinksCollector(
         const val MAX_DRY_SCROLLS = 3
         const val CONTROL_WAIT_TIMEOUT_MS = 10 * 60_000L
         const val MAX_PROFILE_RESTARTS = 3
+
+        /** Discovery attempts before a zero-link conclusion is allowed. */
+        const val MAX_ATTEMPTS = 3
+
+        /** Settle after navigation / reload, before the first extraction of an attempt. */
+        const val SETTLE_MS = 1_500L
+
+        /** Settle between discovery attempts (after the coaxing scrolls). */
+        const val SETTLE_BETWEEN_ATTEMPTS_MS = 1_200L
+
+        /**
+         * Minimum wall-clock effort before ANY zero-link conclusion
+         * (NO_POSTS / gated) may be returned for a profile. The attempt
+         * delays normally exceed this; the floor makes a ~2-second
+         * conclusion impossible by construction.
+         */
+        const val MIN_ZERO_EFFORT_MS = 8_000L
+
+        /** Overall per-profile budget bounding the whole escalation ladder. */
+        const val PER_PROFILE_BUDGET_MS = 180_000L
+
+        /** Scroll cap for a single fallback-method harvest (M2/M4). */
+        const val MAX_FALLBACK_SCROLLS = 6
+
+        /** Longer settle for the desktop variant (M4) — heavier pages. */
+        const val DESKTOP_SETTLE_MS = 2_500L
     }
 
     // ------------------------------------------------------------------
@@ -143,7 +177,12 @@ class FacebookLinksCollector(
                 results.add(e.result)
                 onProfileDone(e.result)
             }
-            return CollectRunOutcome(results, stoppedEarly = true, stopReason = e.reason)
+            return CollectRunOutcome(
+                results,
+                stoppedEarly = true,
+                stopReason = e.reason,
+                stoppedForLogin = e.stoppedForLogin
+            )
         }
         return CollectRunOutcome(results)
     }
@@ -168,6 +207,7 @@ class FacebookLinksCollector(
             )
         }
 
+        val profileStartMs = System.currentTimeMillis()
         var loginPauseUsed = false
         var openRetries = 0
         var fbRecoveries = 0
@@ -232,7 +272,8 @@ class FacebookLinksCollector(
                                 FacebookProfileStatus.LOGIN_REQUIRED,
                                 note = "Login was not completed — the run stopped here."
                             ),
-                            "Login was not completed in time — run stopped."
+                            "Login was not completed in time — run stopped.",
+                            stoppedForLogin = true
                         )
                     }
                 }
@@ -302,22 +343,220 @@ class FacebookLinksCollector(
                                         outcome.links,
                                         "Login was not completed — the run stopped here."
                                     ),
-                                    "Login was not completed in time — run stopped."
+                                    "Login was not completed in time — run stopped.",
+                                    stoppedForLogin = true
                                 )
                             }
                         }
                         else -> {
+                            // ---- Escalation ladder M1→M5 ----
+                            // M1 (mobile anchors) is done: [outcome]. While
+                            // its harvest is short and the per-profile
+                            // budget remains, the ladder escalates: M2 the
+                            // profile's own Posts section → M3 source
+                            // mining merged WITH M1's set → M4 desktop →
+                            // M5 mbasic. The final set comes from the best
+                            // candidate; every method's yield is recorded
+                            // in the audit trail. Terminal classifications
+                            // (locked/unavailable/login) never reach here —
+                            // they short-circuit in M1 above.
+                            fun linkWord(n: Int) = if (n == 1) "link" else "links"
+                            val candidates = mutableListOf<FacebookPostLinks.MethodYield>()
+                            val summaryParts = mutableListOf<String>()
+                            candidates += FacebookPostLinks.MethodYield("M1 mobile", outcome.links)
+                            summaryParts += "M1 mobile: ${outcome.links.size} ${linkWord(outcome.links.size)}"
+                            var postsAreaEvidence = outcome.postsAreaRendered
+
+                            fun budgetLeft(): Long =
+                                PER_PROFILE_BUDGET_MS - (System.currentTimeMillis() - profileStartMs)
+                            fun bestSoFar(): Int = candidates.maxOf { it.links.size }
+                            suspend fun manualControlStop(): Boolean {
+                                if (browserController.controlMode.value !=
+                                    BrowserControlMode.MANUAL_CONTROL
+                                ) {
+                                    return false
+                                }
+                                hooks.onStep(
+                                    "Ladder stopped for $normalized — the browser is under your control; " +
+                                        "concluding with the best set so far"
+                                )
+                                return true
+                            }
+
+                            // M2 — the profile's own Posts-section anchor.
+                            if (FacebookPostLinks.shouldEscalate(bestSoFar(), count, budgetLeft()) &&
+                                !manualControlStop()
+                            ) {
+                                browserController.scrollUp(3.0)
+                                delay(400)
+                                val anchorsNow = browserController.extractAnchorHrefs().orEmpty()
+                                val sectionHref =
+                                    FacebookPostLinks.findPostsSectionAnchor(anchorsNow, normalized)
+                                if (sectionHref == null) {
+                                    hooks.onStep("M2 posts section: no Posts tab anchor found in the page — skipped")
+                                } else {
+                                    val nav = browserController.navigate(sectionHref)
+                                    if (!nav.success) {
+                                        hooks.onStep("M2 posts section: navigation failed — skipped")
+                                    } else {
+                                        browserController.waitForLoad(LOAD_TIMEOUT_MS)
+                                        val h = harvestCurrentPage(count, MAX_FALLBACK_SCROLLS, SETTLE_MS)
+                                        if (h.loginWall) {
+                                            hooks.onStep("M2 posts section: hit a login wall — skipped (login pauses come only from M1)")
+                                        } else {
+                                            candidates += FacebookPostLinks.MethodYield("M2 posts section", h.links)
+                                            summaryParts += "M2 posts section: ${h.links.size} ${linkWord(h.links.size)}"
+                                            if (h.postsAreaRendered) postsAreaEvidence = true
+                                            hooks.onStep("M2 posts section: ${h.links.size} link(s)")
+                                            if (h.rendererDied) {
+                                                hooks.onStep("The browser renderer stopped during M2 — continuing the ladder")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // M3 — source mining, merged WITH the M1 set
+                            // (combined scroll+mine loop on the profile).
+                            if (FacebookPostLinks.shouldEscalate(bestSoFar(), count, budgetLeft()) &&
+                                !manualControlStop()
+                            ) {
+                                val navBack = browserController.navigate(normalized)
+                                if (!navBack.success) {
+                                    hooks.onStep("M3 source mining: could not reopen the profile — skipped")
+                                } else {
+                                    browserController.waitForLoad(LOAD_TIMEOUT_MS)
+                                    delay(SETTLE_MS)
+                                    val combined = LinkedHashSet(outcome.links)
+                                    val added = runSourceMiningLoop(normalized, count, combined, profileStartMs)
+                                    candidates += FacebookPostLinks.MethodYield(
+                                        "M1+M3 combined", combined.toList()
+                                    )
+                                    summaryParts += "M3 source mining: +$added new (${combined.size} total)"
+                                    hooks.onStep("M3 source mining: +$added new link(s), ${combined.size} total with M1")
+                                }
+                            }
+
+                            // M4 — desktop variant (mobile UA ALWAYS restored).
+                            if (FacebookPostLinks.shouldEscalate(bestSoFar(), count, budgetLeft()) &&
+                                !manualControlStop()
+                            ) {
+                                var m4Links: List<String>? = null
+                                try {
+                                    if (browserController.setDesktopMode(true)) {
+                                        val www = FacebookPostLinks.hostVariant(
+                                            normalized, "www.facebook.com"
+                                        )
+                                        val nav = browserController.navigate(www)
+                                        if (nav.success) {
+                                            browserController.waitForLoad(LOAD_TIMEOUT_MS)
+                                            val h = harvestCurrentPage(
+                                                count, MAX_FALLBACK_SCROLLS, DESKTOP_SETTLE_MS
+                                            )
+                                            if (!h.loginWall) {
+                                                val mined = FacebookPostLinks.mineLinksFromPageSource(
+                                                    browserController.extractPageSource(), normalized
+                                                )
+                                                m4Links = (h.links + mined).distinct()
+                                                if (h.postsAreaRendered) postsAreaEvidence = true
+                                            }
+                                        }
+                                    }
+                                } finally {
+                                    browserController.setDesktopMode(false)
+                                }
+                                if (m4Links != null) {
+                                    candidates += FacebookPostLinks.MethodYield("M4 desktop", m4Links)
+                                    summaryParts += "M4 desktop: ${m4Links.size} ${linkWord(m4Links.size)}"
+                                    hooks.onStep("M4 desktop: ${m4Links.size} link(s)")
+                                } else {
+                                    hooks.onStep("M4 desktop: skipped (login wall or load failure on the desktop variant)")
+                                }
+                            }
+
+                            // M5 — mbasic variant + at most 2 "See more" follows.
+                            if (FacebookPostLinks.shouldEscalate(bestSoFar(), count, budgetLeft()) &&
+                                !manualControlStop()
+                            ) {
+                                val mbasic = FacebookPostLinks.hostVariant(
+                                    normalized, "mbasic.facebook.com"
+                                )
+                                val nav = browserController.navigate(mbasic)
+                                if (!nav.success) {
+                                    hooks.onStep("M5 mbasic: navigation failed — skipped")
+                                } else {
+                                    browserController.waitForLoad(LOAD_TIMEOUT_MS)
+                                    delay(SETTLE_MS)
+                                    val probe5 = browserController.extractPageProbeJson()?.let {
+                                        FacebookPostLinks.signalsFromProbeJson(
+                                            it, rendererGone = browserController.rendererCrashed
+                                        )
+                                    }
+                                    val walled5 = browserController.rendererCrashed ||
+                                        FacebookPostLinks.isLoginUrl(
+                                            browserController.getCurrentUrl().data.orEmpty()
+                                        ) ||
+                                        (probe5 != null &&
+                                            FacebookPostLinks.classifyPage(probe5) ==
+                                            FacebookPageClass.LOGIN_WALL)
+                                    if (walled5) {
+                                        hooks.onStep("M5 mbasic: hit a login wall — skipped (login pauses come only from M1)")
+                                    } else {
+                                        if (probe5?.hasPostsArea == true) postsAreaEvidence = true
+                                        val links5 = LinkedHashSet<String>()
+                                        var follows = 0
+                                        while (true) {
+                                            currentCoroutineContext().ensureActive()
+                                            val hrefs = browserController.extractAnchorHrefs()
+                                            if (hrefs != null) {
+                                                links5.addAll(FacebookPostLinks.extractPostLinks(hrefs))
+                                            }
+                                            if (links5.size >= count || follows >= 2) break
+                                            val withText =
+                                                browserController.extractAnchorsWithText() ?: break
+                                            val more =
+                                                FacebookPostLinks.findSeeMoreHref(withText) ?: break
+                                            if (!browserController.navigate(more).success) break
+                                            follows++
+                                            browserController.waitForLoad(LOAD_TIMEOUT_MS)
+                                            delay(800)
+                                        }
+                                        candidates += FacebookPostLinks.MethodYield(
+                                            "M5 mbasic", links5.toList()
+                                        )
+                                        summaryParts += "M5 mbasic: ${links5.size} ${linkWord(links5.size)}"
+                                        hooks.onStep("M5 mbasic: ${links5.size} link(s)")
+                                    }
+                                }
+                            }
+
+                            // ---- Final resolution: the best candidate wins ----
+                            val best = FacebookPostLinks.selectBestYield(candidates)!!
+                            val finalLinks = best.links.take(count)
+                            val methodsSummary = summaryParts.joinToString("; ") +
+                                " — final set from ${best.method}"
+                            hooks.onStep("Methods for $normalized — $methodsSummary")
                             val status = FacebookPostLinks.finalStatus(
-                                FacebookPageClass.CONTENT, outcome.links.size, count
+                                FacebookPageClass.CONTENT, finalLinks.size, count,
+                                postsAreaRendered = postsAreaEvidence
                             )
                             val note = when (status) {
                                 FacebookProfileStatus.PARTIAL ->
-                                    "Only ${outcome.links.size} of $count posts were found on this profile."
+                                    "Only ${finalLinks.size} of $count posts were found on this profile (best method: ${best.method})."
                                 FacebookProfileStatus.NO_POSTS ->
-                                    "The profile loaded but no post permalinks were found."
+                                    "Every method was tried — the posts area rendered, but no post permalinks were found."
+                                FacebookProfileStatus.LOGIN_REQUIRED ->
+                                    "Every method was tried — Facebook showed no posts for this profile; it may be asking for a login (Needs you)."
                                 else -> null
                             }
-                            return result(status, outcome.links, note)
+                            return FacebookProfileResult(
+                                profile = rawProfile,
+                                normalizedUrl = normalized,
+                                status = status,
+                                links = finalLinks,
+                                note = note,
+                                methodsSummary = methodsSummary
+                            )
                         }
                     }
                 }
@@ -358,7 +597,21 @@ class FacebookLinksCollector(
     }
 
     // ------------------------------------------------------------------
-    // The collection loop: extract → scroll → extract … until N or stop
+    // The collection loop, in two phases.
+    //
+    // Phase 1 — DISCOVERY ATTEMPTS (only while zero links are found).
+    // A zero-link conclusion may never rest on a single instant
+    // extraction: attempt 1 settles after navigation, attempt 2 scrolls
+    // to coax lazy rendering, attempt 3 reloads once. Every attempt
+    // re-extracts from the FRESH DOM and records a probe step (final
+    // URL, logged-in signal, anchors scanned, links found, timing, and
+    // — when anchors existed but none matched — sample hrefs), and the
+    // MIN_ZERO_EFFORT_MS floor makes a ~2-second conclusion impossible
+    // by construction.
+    //
+    // Phase 2 — TOP-UP (links exist): the original dry-scroll loop —
+    // extract → scroll → extract … until N, the bottom, 3 dry scrolls
+    // or the shared scroll budget runs out.
     // ------------------------------------------------------------------
 
     private suspend fun collectLinks(
@@ -369,18 +622,48 @@ class FacebookLinksCollector(
     ): CollectOutcome {
         val found = LinkedHashSet(initial)
         var scrolls = 0
-        var dryScrolls = 0
+        var postsAreaRendered = false
+        var attemptsUsed = 0
+        val collectionStart = System.currentTimeMillis()
 
-        while (found.size < count && scrolls <= MAX_SCROLLS) {
+        // ---------------- Phase 1: discovery attempts ----------------
+        while (found.isEmpty() && attemptsUsed < MAX_ATTEMPTS) {
+            attemptsUsed++
+            val attemptStart = System.currentTimeMillis()
+            when (attemptsUsed) {
+                1 -> delay(SETTLE_MS) // let the feed render after navigation
+                2 -> {
+                    var n = 0
+                    while (n < 2 && scrolls < MAX_SCROLLS) {
+                        browserController.scrollDown(1.0)
+                        scrolls++
+                        n++
+                        delay(400)
+                    }
+                    delay(SETTLE_BETWEEN_ATTEMPTS_MS)
+                }
+                3 -> {
+                    hooks.onStep("Still no post links on $normalized — reloading once (attempt $MAX_ATTEMPTS/$MAX_ATTEMPTS)")
+                    browserController.reloadAction()
+                    browserController.waitForLoad(LOAD_TIMEOUT_MS)
+                    delay(SETTLE_MS)
+                }
+            }
             currentCoroutineContext().ensureActive()
 
             if (browserController.rendererCrashed) {
-                return CollectOutcome(found.toList(), rendererDied = true)
+                return CollectOutcome(
+                    found.toList(), rendererDied = true,
+                    postsAreaRendered = postsAreaRendered, attemptsUsed = attemptsUsed
+                )
             }
-            // A checkpoint can interrupt mid-scroll: the URL gives it away.
+            // A checkpoint can interrupt at any time: the URL gives it away.
             val currentUrl = browserController.getCurrentUrl().data.orEmpty()
             if (FacebookPostLinks.isLoginUrl(currentUrl)) {
-                return CollectOutcome(found.toList(), loginDetected = true)
+                return CollectOutcome(
+                    found.toList(), loginDetected = true,
+                    postsAreaRendered = postsAreaRendered, attemptsUsed = attemptsUsed
+                )
             }
             if (browserController.controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
                 // The user grabbed the browser mid-collection. Wait for
@@ -389,7 +672,92 @@ class FacebookLinksCollector(
                 if (!ensureAgentControl(hooks)) {
                     throw AbortRunException(null, "Browser control was not handed back in time — run stopped.")
                 }
-                return CollectOutcome(found.toList(), restart = true)
+                return CollectOutcome(
+                    found.toList(), restart = true,
+                    postsAreaRendered = postsAreaRendered, attemptsUsed = attemptsUsed
+                )
+            }
+
+            // Fresh extraction from the live DOM — never a cached list.
+            val scannedHrefs = mutableListOf<String>()
+            val hrefs = browserController.extractAnchorHrefs()
+            if (hrefs != null) {
+                scannedHrefs.addAll(hrefs)
+                found.addAll(FacebookPostLinks.extractPostLinks(hrefs))
+            }
+            if (found.isEmpty()) {
+                // Fallback scan: anchors inside feed/article containers.
+                val containerHrefs = browserController.extractContainerAnchorHrefs()
+                if (containerHrefs != null) {
+                    scannedHrefs.addAll(containerHrefs)
+                    found.addAll(FacebookPostLinks.extractPostLinks(containerHrefs))
+                }
+            }
+
+            // Probe: posts-area evidence, late-rendered login gates, and
+            // the data for this attempt's diagnostic step.
+            var loginGateSeen = false
+            val probeJson = browserController.extractPageProbeJson()
+            val signals = probeJson?.let {
+                FacebookPostLinks.signalsFromProbeJson(
+                    it, rendererGone = browserController.rendererCrashed
+                )
+            }
+            if (signals != null) {
+                if (signals.hasPostsArea) postsAreaRendered = true
+                if (FacebookPostLinks.classifyPage(signals) == FacebookPageClass.LOGIN_WALL) {
+                    loginGateSeen = true
+                }
+            }
+            recordProbeStep(
+                hooks, normalized, attemptsUsed, attemptStart,
+                signals, scannedHrefs, found.size
+            )
+            if (loginGateSeen) {
+                return CollectOutcome(
+                    found.toList(), loginDetected = true,
+                    postsAreaRendered = postsAreaRendered, attemptsUsed = attemptsUsed
+                )
+            }
+        }
+
+        if (found.isEmpty()) {
+            // Minimum-effort floor for ANY zero-link conclusion: the
+            // attempt delays normally exceed it — this is the guarantee.
+            val elapsed = System.currentTimeMillis() - collectionStart
+            if (elapsed < MIN_ZERO_EFFORT_MS) delay(MIN_ZERO_EFFORT_MS - elapsed)
+            return CollectOutcome(
+                found.toList(),
+                postsAreaRendered = postsAreaRendered, attemptsUsed = attemptsUsed
+            )
+        }
+
+        // ---------------- Phase 2: top-up scrolling ----------------
+        var dryScrolls = 0
+        while (found.size < count && scrolls <= MAX_SCROLLS) {
+            currentCoroutineContext().ensureActive()
+
+            if (browserController.rendererCrashed) {
+                return CollectOutcome(
+                    found.toList(), rendererDied = true,
+                    postsAreaRendered = postsAreaRendered, attemptsUsed = attemptsUsed
+                )
+            }
+            val currentUrl = browserController.getCurrentUrl().data.orEmpty()
+            if (FacebookPostLinks.isLoginUrl(currentUrl)) {
+                return CollectOutcome(
+                    found.toList(), loginDetected = true,
+                    postsAreaRendered = postsAreaRendered, attemptsUsed = attemptsUsed
+                )
+            }
+            if (browserController.controlMode.value == BrowserControlMode.MANUAL_CONTROL) {
+                if (!ensureAgentControl(hooks)) {
+                    throw AbortRunException(null, "Browser control was not handed back in time — run stopped.")
+                }
+                return CollectOutcome(
+                    found.toList(), restart = true,
+                    postsAreaRendered = postsAreaRendered, attemptsUsed = attemptsUsed
+                )
             }
 
             val before = found.size
@@ -414,7 +782,172 @@ class FacebookLinksCollector(
             scrolls++
             delay(600)
         }
-        return CollectOutcome(found.toList())
+        return CollectOutcome(
+            found.toList(),
+            postsAreaRendered = postsAreaRendered, attemptsUsed = attemptsUsed
+        )
+    }
+
+    /**
+     * The per-attempt probe record (FIX: diagnosability). One step per
+     * discovery attempt carrying everything the next failure needs:
+     * attempt number + timing, the final URL, whether the page looks
+     * logged in, how many anchors were scanned and how many links they
+     * yielded — plus, when anchors existed but NONE matched the
+     * permalink patterns, up to 10 sample hrefs so a pattern gap vs a
+     * render gap is obvious from the trail alone.
+     */
+    private suspend fun recordProbeStep(
+        hooks: Hooks,
+        normalized: String,
+        attempt: Int,
+        attemptStartMs: Long,
+        signals: FacebookPageSignals?,
+        scannedHrefs: List<String>,
+        linksFound: Int
+    ) {
+        val elapsedSec = (System.currentTimeMillis() - attemptStartMs) / 1000.0
+        val loggedIn = when {
+            signals == null -> "unknown"
+            signals.hasLoginForm || signals.hasLoginGate ||
+                FacebookPostLinks.isLoginUrl(signals.finalUrl) -> "no"
+            else -> "yes"
+        }
+        val sb = StringBuilder()
+        sb.append("Probe ").append(normalized)
+            .append(" — attempt ").append(attempt).append('/').append(MAX_ATTEMPTS)
+            .append(" (").append(String.format(java.util.Locale.US, "%.1f", elapsedSec)).append("s)")
+            .append(": final URL ").append(signals?.finalUrl?.ifBlank { normalized } ?: normalized)
+            .append(", logged-in signal: ").append(loggedIn)
+            .append(", anchors scanned ").append(scannedHrefs.size)
+            .append(", links found ").append(linksFound)
+        if (scannedHrefs.isNotEmpty() && linksFound == 0) {
+            val samples = FacebookPostLinks.sampleHrefsForDiagnostics(scannedHrefs)
+            if (samples.isNotEmpty()) {
+                sb.append(" — sample hrefs: [").append(samples.joinToString(", ")).append(']')
+            }
+        }
+        hooks.onStep(sb.toString())
+    }
+
+    /** Outcome of a fallback harvest of the page currently on screen. */
+    private data class HarvestOutcome(
+        val links: List<String>,
+        val postsAreaRendered: Boolean = false,
+        val loginWall: Boolean = false,
+        val rendererDied: Boolean = false
+    )
+
+    /**
+     * Fallback harvest of the CURRENT page (M2 posts section, M4
+     * desktop): settle → probe → FRESH extract (+ container fallback)
+     * → scroll-topup within [maxScrolls]. A login wall is only
+     * REPORTED, never acted on — the login pause belongs to M1 alone.
+     */
+    private suspend fun harvestCurrentPage(
+        count: Int,
+        maxScrolls: Int,
+        settleMs: Long
+    ): HarvestOutcome {
+        delay(settleMs)
+        val found = LinkedHashSet<String>()
+        var postsArea = false
+        var scrolls = 0
+        var dry = 0
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            if (browserController.rendererCrashed) {
+                return HarvestOutcome(found.toList(), postsArea, rendererDied = true)
+            }
+            val url = browserController.getCurrentUrl().data.orEmpty()
+            if (FacebookPostLinks.isLoginUrl(url)) {
+                return HarvestOutcome(found.toList(), postsArea, loginWall = true)
+            }
+            val probeJson = browserController.extractPageProbeJson()
+            val signals = probeJson?.let {
+                FacebookPostLinks.signalsFromProbeJson(
+                    it, rendererGone = browserController.rendererCrashed
+                )
+            }
+            if (signals != null) {
+                if (signals.hasPostsArea) postsArea = true
+                if (FacebookPostLinks.classifyPage(signals) == FacebookPageClass.LOGIN_WALL) {
+                    return HarvestOutcome(found.toList(), postsArea, loginWall = true)
+                }
+            }
+            val before = found.size
+            val hrefs = browserController.extractAnchorHrefs()
+            if (hrefs != null) found.addAll(FacebookPostLinks.extractPostLinks(hrefs))
+            if (found.isEmpty()) {
+                val containerHrefs = browserController.extractContainerAnchorHrefs()
+                if (containerHrefs != null) {
+                    found.addAll(FacebookPostLinks.extractPostLinks(containerHrefs))
+                }
+            }
+            if (found.size >= count) break
+            if (found.size == before) {
+                dry++
+                if (dry >= 2) break
+                val state = browserController.readScrollState()
+                if (state != null && !state.canScrollDown) break
+            } else {
+                dry = 0
+            }
+            if (scrolls >= maxScrolls) break
+            browserController.scrollDown(1.0)
+            scrolls++
+            delay(600)
+        }
+        return HarvestOutcome(found.toList(), postsArea)
+    }
+
+    /**
+     * M3's combined scroll+mine loop — the ladder's deepest pass. Each
+     * iteration re-reads the FRESH DOM anchors AND re-mines the FULL
+     * CURRENT page source: scrolling makes Facebook append more
+     * payload data, so a later pass sees strictly more than the first.
+     * New finds merge into [into] in first-appearance order (the
+     * caller's existing links — M1's visible anchors — keep their
+     * lead; mined-only links follow in payload discovery order).
+     * Returns how many NEW links this loop added. Bounded by the
+     * count target, the dry-scroll and scroll caps, and the overall
+     * per-profile time budget.
+     */
+    private suspend fun runSourceMiningLoop(
+        normalized: String,
+        count: Int,
+        into: LinkedHashSet<String>,
+        profileStartMs: Long
+    ): Int {
+        val startSize = into.size
+        var scrolls = 0
+        var dryPasses = 0
+        while (into.size < count) {
+            currentCoroutineContext().ensureActive()
+            if (browserController.rendererCrashed) break
+            if (System.currentTimeMillis() - profileStartMs > PER_PROFILE_BUDGET_MS) break
+            val url = browserController.getCurrentUrl().data.orEmpty()
+            if (FacebookPostLinks.isLoginUrl(url)) break
+            val before = into.size
+            val hrefs = browserController.extractAnchorHrefs()
+            if (hrefs != null) into.addAll(FacebookPostLinks.extractPostLinks(hrefs))
+            val source = browserController.extractPageSource()
+            into.addAll(FacebookPostLinks.mineLinksFromPageSource(source, normalized))
+            if (into.size >= count) break
+            if (into.size == before) {
+                dryPasses++
+                if (dryPasses >= MAX_DRY_SCROLLS) break
+                val state = browserController.readScrollState()
+                if (state != null && !state.canScrollDown) break
+            } else {
+                dryPasses = 0
+            }
+            if (scrolls >= MAX_SCROLLS) break
+            browserController.scrollDown(1.0)
+            scrolls++
+            delay(700)
+        }
+        return into.size - startSize
     }
 
     // ------------------------------------------------------------------

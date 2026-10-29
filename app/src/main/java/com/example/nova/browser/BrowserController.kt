@@ -229,9 +229,100 @@ class BrowserController(private val appContext: Context? = null) {
     }
 
     /**
-     * The page-probe JSON ({url, title, hasPassword, hasLoginForm, text})
-     * consumed by FacebookPostLinks.signalsFromProbeJson. Null when no
-     * page could be read at all.
+     * Anchor hrefs inside feed/article containers only — the fallback
+     * scan for collectors when the global anchor scan found nothing the
+     * patterns accept (feed markup sometimes differs from page chrome).
+     * Null when no page could be read.
+     */
+    suspend fun extractContainerAnchorHrefs(): List<String>? {
+        val raw = evaluateJs(CONTAINER_ANCHORS_JS) ?: return null
+        return try {
+            val arr = JSONArray(unescapeJsString(raw))
+            val out = ArrayList<String>(arr.length())
+            for (i in 0 until arr.length()) {
+                val h = arr.optString(i)
+                if (h.isNotBlank()) out.add(h)
+            }
+            out
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Anchors with their visible text ([Pair] of href to text), for
+     * pagination hunting (mbasic "See more…"). Null when unreadable.
+     */
+    suspend fun extractAnchorsWithText(): List<Pair<String, String>>? {
+        val raw = evaluateJs(ANCHORS_WITH_TEXT_JS) ?: return null
+        return try {
+            val arr = JSONArray(unescapeJsString(raw))
+            val out = ArrayList<Pair<String, String>>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val h = obj.optString("h")
+                if (h.isNotBlank()) out.add(h to obj.optString("t"))
+            }
+            out
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * The raw page source (outerHTML — includes the JSON payloads FB
+     * embeds in script tags), for the collector's M3 source mining.
+     * Null when no page could be read.
+     */
+    suspend fun extractPageSource(): String? {
+        val raw = evaluateJs(PAGE_SOURCE_JS) ?: return null
+        val clean = unescapeJsString(raw)
+        return if (clean.isBlank() || clean == "null") null else clean
+    }
+
+    private var savedUserAgent: String? = null
+    private var desktopModeActive = false
+
+    /**
+     * M4 support: switches the shared WebView to a desktop user agent
+     * (and a wide offscreen viewport while unattached) or back to the
+     * configured mobile UA. Restoring is exact and idempotent — callers
+     * pair it in a finally block. Returns false when no WebView exists.
+     */
+    suspend fun setDesktopMode(enabled: Boolean): Boolean = withContext(Dispatchers.Main) {
+        val wv = obtainWebViewLocked() ?: return@withContext false
+        if (enabled) {
+            if (savedUserAgent == null) savedUserAgent = wv.settings.userAgentString
+            wv.settings.userAgentString = DESKTOP_USER_AGENT
+            desktopModeActive = true
+            if (wv.parent == null) {
+                val w = android.view.View.MeasureSpec.makeMeasureSpec(1280, android.view.View.MeasureSpec.EXACTLY)
+                val h = android.view.View.MeasureSpec.makeMeasureSpec(900, android.view.View.MeasureSpec.EXACTLY)
+                wv.measure(w, h)
+                wv.layout(0, 0, 1280, 900)
+            }
+        } else {
+            savedUserAgent?.let { wv.settings.userAgentString = it }
+            savedUserAgent = null
+            desktopModeActive = false
+            if (wv.parent == null) {
+                val w = android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY)
+                val h = android.view.View.MeasureSpec.makeMeasureSpec(1920, android.view.View.MeasureSpec.EXACTLY)
+                wv.measure(w, h)
+                wv.layout(0, 0, 1080, 1920)
+            }
+        }
+        true
+    }
+
+    /** True while the shared WebView presents the desktop UA (M4). */
+    fun isDesktopMode(): Boolean = desktopModeActive
+
+    /**
+     * The page-probe JSON ({url, title, hasPassword, hasLoginForm,
+     * hasLoginGate, hasPostsArea, text}) consumed by
+     * FacebookPostLinks.signalsFromProbeJson. Null when no page could be
+     * read at all.
      */
     suspend fun extractPageProbeJson(): String? {
         val raw = evaluateJs(PAGE_PROBE_JS) ?: return null
@@ -1433,6 +1524,53 @@ class BrowserController(private val appContext: Context? = null) {
         })();
     """.trimIndent()
 
+    /** Desktop user agent presented during the collector's M4 fallback. */
+    private val DESKTOP_USER_AGENT =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+    /** Anchors with visible text (pagination hunting). */
+    private val ANCHORS_WITH_TEXT_JS = """
+        (function() {
+            try {
+                var nodes = document.querySelectorAll('a[href]');
+                var out = [];
+                for (var i = 0; i < nodes.length && out.length < 500; i++) {
+                    out.push({h: nodes[i].href, t: (nodes[i].innerText || nodes[i].textContent || '').trim().substring(0, 80)});
+                }
+                return JSON.stringify(out);
+            } catch (e) {
+                return JSON.stringify([]);
+            }
+        })();
+    """.trimIndent()
+
+    /** Raw page source for source-mining collectors (M3). */
+    private val PAGE_SOURCE_JS = """
+        (function() {
+            try {
+                return document.documentElement ? document.documentElement.outerHTML : '';
+            } catch (e) {
+                return '';
+            }
+        })();
+    """.trimIndent()
+
+    /** Anchor harvest restricted to feed/article containers (collector fallback scan). */
+    private val CONTAINER_ANCHORS_JS = """
+        (function() {
+            try {
+                var nodes = document.querySelectorAll('article a[href], [role="article"] a[href], [role="feed"] a[href]');
+                var out = [];
+                for (var i = 0; i < nodes.length && out.length < 3000; i++) {
+                    out.push(nodes[i].href);
+                }
+                return JSON.stringify(out);
+            } catch (e) {
+                return JSON.stringify([]);
+            }
+        })();
+    """.trimIndent()
+
     /**
      * Page probe for trained classifiers: identity (url/title), login-wall
      * signals (password field / login form) and a visible-text excerpt for
@@ -1451,6 +1589,42 @@ class BrowserController(private val appContext: Context? = null) {
                         if (action.indexOf('login') >= 0 || id.indexOf('login') >= 0) { hasLoginForm = true; break; }
                     }
                 }
+                // Logged-out GATE (no form): a visible anchor/CTA to a
+                // login endpoint, a "Log In" labelled control, or the
+                // "see more on facebook" nag anywhere in the page text.
+                // Structural hrefs are language-independent; the text
+                // scan covers the whole body, not just the excerpt.
+                function visible(el) {
+                    if (!el) return false;
+                    var r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return false;
+                    var s = window.getComputedStyle(el);
+                    return s.display !== 'none' && s.visibility !== 'hidden';
+                }
+                var hasLoginGate = false;
+                var loginAnchors = document.querySelectorAll('a[href*="login.php"], a[href*="/login/"], a[href*="/login?"]');
+                for (var j = 0; j < loginAnchors.length; j++) {
+                    if (visible(loginAnchors[j])) { hasLoginGate = true; break; }
+                }
+                if (!hasLoginGate) {
+                    var ctas = document.querySelectorAll('a, button, [role="button"]');
+                    for (var k = 0; k < ctas.length && k < 400; k++) {
+                        var label = (ctas[k].innerText || ctas[k].textContent || '').trim().toLowerCase();
+                        if ((label === 'log in' || label === 'login') && visible(ctas[k])) { hasLoginGate = true; break; }
+                    }
+                }
+                var fullText = '';
+                try { fullText = (document.body ? document.body.innerText : '').toLowerCase(); } catch (e) {}
+                if (!hasLoginGate && fullText.indexOf('see more on facebook') >= 0) { hasLoginGate = true; }
+                // Positive evidence the posts area rendered: feed /
+                // article containers, or a Posts section header.
+                var hasPostsArea = !!document.querySelector('article, [role="article"], [role="feed"]');
+                if (!hasPostsArea) {
+                    var heads = document.querySelectorAll('h1, h2, h3, [role="heading"]');
+                    for (var m = 0; m < heads.length; m++) {
+                        if ((heads[m].innerText || '').trim().toLowerCase() === 'posts') { hasPostsArea = true; break; }
+                    }
+                }
                 var text = '';
                 try { text = document.body ? document.body.innerText.substring(0, 4000) : ''; } catch (e) {}
                 return JSON.stringify({
@@ -1458,10 +1632,12 @@ class BrowserController(private val appContext: Context? = null) {
                     title: document.title || '',
                     hasPassword: hasPassword,
                     hasLoginForm: hasLoginForm,
+                    hasLoginGate: hasLoginGate,
+                    hasPostsArea: hasPostsArea,
                     text: text
                 });
             } catch (e) {
-                return JSON.stringify({url: '', title: '', hasPassword: false, hasLoginForm: false, text: ''});
+                return JSON.stringify({url: '', title: '', hasPassword: false, hasLoginForm: false, hasLoginGate: false, hasPostsArea: false, text: ''});
             }
         })();
     """.trimIndent()

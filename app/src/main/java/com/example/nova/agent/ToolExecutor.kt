@@ -223,6 +223,9 @@ class ToolExecutor(
                         sb.append("Status: ").append(result.status.name)
                         result.note?.let { sb.append(" — ").append(it) }
                         sb.append('\n')
+                        result.methodsSummary?.let {
+                            sb.append("Methods: ").append(it).append('\n')
+                        }
                         sb.append("Links (").append(result.links.size).append("):\n")
                         result.links.forEachIndexed { i, link ->
                             sb.append(i + 1).append(". ").append(link).append('\n')

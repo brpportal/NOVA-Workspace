@@ -21,18 +21,32 @@ core also runs without AI from the Tasks screen ("Trained Tasks").
 - The result is also saved to a markdown file in AI-Tasks/ — mention
   the saved file when you present the results.
 
+## How the collector tries (automatic — you do not drive this)
+
+The collector escalates through several methods per profile on its
+own, in order, and stops as soon as enough links are found:
+M1 the mobile profile (settle, extract, scroll) → M2 the profile's
+own Posts section → M3 mining the page's embedded data payloads —
+usually the strongest source, merged with M1's links → M4 the
+desktop variant of the page → M5 the mbasic variant. The tool result
+reports which methods were tried and which one produced the links
+("Methods: …"). A locked or unavailable profile stops the ladder at
+once; a login pause can only come from M1 — the fallbacks never ask
+for a login.
+
 ## Statuses — report them exactly, never blur them
 
 - OK — all requested links were collected.
 - PARTIAL — the profile is fine but fewer posts exist than requested.
   Report the actual count; PARTIAL is not a failure.
-- NO_POSTS — the profile loaded but has no visible post permalinks.
+- NO_POSTS — the profile loaded and its posts area rendered, but no
+  post permalinks were found (after every method was tried).
 - PROFILE_LOCKED — the profile is locked/private; posts are not visible.
 - PROFILE_UNAVAILABLE — banned, deactivated or not found.
 - OPEN_FAILED — the page could not be loaded.
 - FB_ERROR — Facebook itself errored (or the browser renderer crashed).
 - LOGIN_REQUIRED — Facebook is asking for a login before showing the
-  profile.
+  profile, including a logged-out "See more on Facebook" gate/nag.
 
 ## The login wall (non-negotiable)
 

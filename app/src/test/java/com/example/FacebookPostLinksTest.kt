@@ -172,6 +172,8 @@ class FacebookPostLinksTest {
         finalUrl = "https://m.facebook.com/some.page",
         title = "Some Page",
         hasLoginForm = false,
+        // The rendered-feed fixture: the posts area IS in the DOM.
+        hasPostsArea = true,
         pageText = "Some Page · 12K followers · Posts · About · Photos. Latest updates from the page."
     )
 
@@ -193,7 +195,9 @@ class FacebookPostLinksTest {
     }
 
     @Test
-    fun `fixture NO_POSTS - valid profile with zero permalinks`() {
+    fun `fixture NO_POSTS - rendered posts area with zero permalinks`() {
+        // NO_POSTS requires POSITIVE evidence the posts area rendered
+        // (contentSignals carries hasPostsArea = true).
         assertEquals(
             FacebookProfileStatus.NO_POSTS,
             FacebookPostLinks.resolveStatus(contentSignals, linkCount = 0, requestedCount = 5)
@@ -360,5 +364,262 @@ class FacebookPostLinksTest {
         assertTrue(md.contains("## https://m.facebook.com/c.page — PROFILE_LOCKED (0 links)"))
         assertTrue(md.contains("_No links collected._"))
         assertTrue(md.contains("Summary: 3 profiles: 1 OK, 1 PARTIAL, 1 PROFILE_LOCKED"))
+    }
+
+    // ------------------------------------------------------------------
+    // v2 patch — logged-out gate, zero-link rules, probe keys
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `fixture LOGIN_REQUIRED - logged-out nag gate without any password field`() {
+        // The dawateislami.net failure shape: profile URL loads, no login
+        // FORM (no password field), but the page wears the login nag.
+        val nag = FacebookPageSignals(
+            finalUrl = "https://m.facebook.com/dawateislami.net",
+            title = "DawateIslami",
+            hasLoginForm = false,
+            hasLoginGate = true,
+            pageText = "DawateIslami · 9.8M followers. See more on Facebook. Log in to see more posts."
+        )
+        assertEquals(FacebookPageClass.LOGIN_WALL, FacebookPostLinks.classifyPage(nag))
+        assertEquals(
+            FacebookProfileStatus.LOGIN_REQUIRED,
+            FacebookPostLinks.resolveStatus(nag, linkCount = 0, requestedCount = 5)
+        )
+    }
+
+    @Test
+    fun `fixture LOGIN_REQUIRED - nag phrases alone classify as a wall`() {
+        for (phrase in listOf("See more on Facebook", "Log in or sign up to view this page")) {
+            val signals = contentSignals.copy(
+                hasPostsArea = false,
+                pageText = "Some Page. $phrase"
+            )
+            assertEquals(
+                "phrase: $phrase",
+                FacebookPageClass.LOGIN_WALL,
+                FacebookPostLinks.classifyPage(signals)
+            )
+        }
+    }
+
+    @Test
+    fun `zero links without posts-area evidence is never NO_POSTS`() {
+        val unseen = contentSignals.copy(hasPostsArea = false)
+        assertEquals(
+            FacebookProfileStatus.LOGIN_REQUIRED,
+            FacebookPostLinks.resolveStatus(unseen, linkCount = 0, requestedCount = 5)
+        )
+        // And when the harvest positively rendered the posts area, the
+        // same zero resolves NO_POSTS.
+        assertEquals(
+            FacebookProfileStatus.NO_POSTS,
+            FacebookPostLinks.finalStatus(
+                FacebookPageClass.CONTENT, linkCount = 0, requestedCount = 5,
+                postsAreaRendered = true
+            )
+        )
+    }
+
+    @Test
+    fun `probe json parses the gate and posts-area keys`() {
+        val json = """{"url":"https://m.facebook.com/x","title":"X","hasPassword":false,
+            "hasLoginForm":false,"hasLoginGate":true,"hasPostsArea":true,"text":"hi"}"""
+        val signals = FacebookPostLinks.signalsFromProbeJson(json, rendererGone = false)
+        assertTrue(signals.hasLoginGate)
+        assertTrue(signals.hasPostsArea)
+    }
+
+    // ------------------------------------------------------------------
+    // v2 patch — modern href shapes + probe sample diagnostics
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `photo slash variant and pfbid page posts are accepted`() {
+        val links = FacebookPostLinks.extractPostLinks(
+            listOf(
+                "https://m.facebook.com/photo/?fbid=102233445566778&set=pcb.998877",
+                "https://m.facebook.com/dawateislami.net/posts/pfbid02AbCdEfGhIjKlMnOpQrStUv",
+                "https://m.facebook.com/dawateislami.net/videos/998877665544332"
+            )
+        )
+        assertEquals(
+            listOf(
+                "https://m.facebook.com/photo/?fbid=102233445566778",
+                "https://m.facebook.com/dawateislami.net/posts/pfbid02AbCdEfGhIjKlMnOpQrStUv",
+                "https://m.facebook.com/dawateislami.net/videos/998877665544332"
+            ),
+            links
+        )
+    }
+
+    @Test
+    fun `story php accepts parameters in any order`() {
+        val links = FacebookPostLinks.extractPostLinks(
+            listOf("https://m.facebook.com/story.php?id=100063693365280&story_fbid=2938475610293847&__cft__[0]=AZX")
+        )
+        assertEquals(
+            listOf("https://m.facebook.com/story.php?story_fbid=2938475610293847&id=100063693365280"),
+            links
+        )
+    }
+
+    @Test
+    fun `sample hrefs for diagnostics prefer post-like links, strip tracking, cap at ten`() {
+        val hrefs = listOf(
+            "https://m.facebook.com/dawateislami.net",
+            "https://m.facebook.com/dawateislami.net/posts/pfbid02XyZ?__cft__[0]=AZa&__tn__=%2CO",
+            "https://m.facebook.com/photo.php?fbid=102233445566778&__cft__[0]=AZb",
+            "https://m.facebook.com/some.nav/link",
+            "https://m.facebook.com/watch/?v=1234567890&ref=share"
+        )
+        val sample = FacebookPostLinks.sampleHrefsForDiagnostics(hrefs)
+        assertTrue(sample.size <= 10)
+        assertTrue(sample.first().contains("/posts/pfbid02XyZ"))
+        assertTrue(sample.any { it.contains("photo.php?fbid=102233445566778") && !it.contains("__cft__") })
+        assertTrue(sample.all { !it.contains("__tn__") && !it.contains("ref=") })
+    }
+
+    // ------------------------------------------------------------------
+    // v2 patch — ladder sequencing + M2/M5 anchor hunting (pure)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `ladder picks the largest yield and the earliest on ties`() {
+        val yields = listOf(
+            FacebookPostLinks.MethodYield("M1 mobile", listOf("a", "b")),
+            FacebookPostLinks.MethodYield("M2 posts section", listOf("a", "b", "c", "d", "e")),
+            FacebookPostLinks.MethodYield("M1+M3 combined", listOf("a", "b", "c", "d", "e"))
+        )
+        assertEquals("M2 posts section", FacebookPostLinks.selectBestYield(yields)?.method)
+        assertTrue(FacebookPostLinks.shouldEscalate(bestLinkCount = 2, requestedCount = 5, budgetLeftMs = 1000))
+        assertFalse(FacebookPostLinks.shouldEscalate(bestLinkCount = 5, requestedCount = 5, budgetLeftMs = 1000))
+        assertFalse(FacebookPostLinks.shouldEscalate(bestLinkCount = 2, requestedCount = 5, budgetLeftMs = 0))
+    }
+
+    @Test
+    fun `posts section anchor is found in the page and permalinks are not sections`() {
+        val hrefs = listOf(
+            "https://m.facebook.com/dawateislami.net/posts/pfbid02AbCdEfGhIjKlMnOpQrStUv",
+            "https://m.facebook.com/dawateislami.net/about",
+            "https://m.facebook.com/dawateislami.net/posts/?__cft__[0]=AZx",
+            "https://m.facebook.com/other.page/posts/"
+        )
+        assertEquals(
+            "https://m.facebook.com/dawateislami.net/posts/?__cft__[0]=AZx",
+            FacebookPostLinks.findPostsSectionAnchor(hrefs, "https://m.facebook.com/dawateislami.net")
+        )
+        assertEquals(
+            "https://m.facebook.com/some.page/?sk=posts",
+            FacebookPostLinks.findPostsSectionAnchor(
+                listOf("https://m.facebook.com/some.page/?sk=posts"),
+                "https://m.facebook.com/some.page"
+            )
+        )
+        assertNull(
+            FacebookPostLinks.findPostsSectionAnchor(
+                listOf("https://m.facebook.com/other.page/posts/"),
+                "https://m.facebook.com/dawateislami.net"
+            )
+        )
+    }
+
+    @Test
+    fun `see more pagination href is found by anchor text`() {
+        val anchors = listOf(
+            "https://m.facebook.com/dawateislami.net" to "Home",
+            "https://m.facebook.com/stories.php?aftercursor=abc123" to "See more stories"
+        )
+        assertEquals(
+            "https://m.facebook.com/stories.php?aftercursor=abc123",
+            FacebookPostLinks.findSeeMoreHref(anchors)
+        )
+        assertNull(FacebookPostLinks.findSeeMoreHref(listOf("https://example.com/x" to "See more")))
+    }
+
+    @Test
+    fun `host variants swap only the facebook host`() {
+        assertEquals(
+            "https://www.facebook.com/dawateislami.net",
+            FacebookPostLinks.hostVariant("https://m.facebook.com/dawateislami.net", "www.facebook.com")
+        )
+        assertEquals(
+            "https://mbasic.facebook.com/profile.php?id=100012345678",
+            FacebookPostLinks.hostVariant(
+                "https://m.facebook.com/profile.php?id=100012345678", "mbasic.facebook.com"
+            )
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // v2 patch — M3 page-source mining (pure)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `mining reads a realistic graphql payload and rejects junk ids`() {
+        // Segment A: a Relay-style story whose canonical link is the
+        // permalink_url (escaped). Its story_fbid has NO digit owner id
+        // within reach (the base64 story id is not an owner), so no
+        // story.php link may be minted from it.
+        val segmentA = """
+            {"node":{"__typename":"Story","id":"UzpfSTExMDA2MzY5MzM2NTI4MDoxMjM0",
+            "story_fbid":"pfbid02QwErTyUiOpAsDfGhJkLzXcVbNm123",
+            "actor_id":100063693365280,"target_id":100063693365280,
+            "permalink_url":"https:\/\/www.facebook.com\/dawateislami.net\/posts\/pfbid02QwErTyUiOpAsDfGhJkLzXcVbNm123",
+            "message":{"text":"A post"}}}
+        """.trimIndent()
+        // Padding so segment B's ids sit far outside segment A's
+        // story_fbid pairing window.
+        val padding = " ".repeat(600)
+        // Segment B: an UNPAIRED story_fbid (a long note pushes every
+        // other id far outside its ±200-char pairing window — the miner
+        // must leave it unlinked rather than guess an owner), then a
+        // second story known only by its top_level_post_id, with a
+        // comment (whose id must NEVER become a link) and a fan user
+        // id (also never a link).
+        val segmentB = """
+            {"node":{"story_fbid":"555444333222111","note":"an embedded story reference with no
+            owner id anywhere near it — this long text pushes every other id in the payload far
+            outside the pairing window so the miner must leave this story unlinked"}},
+            {"node":{"__typename":"Story","top_level_post_id":"3387654321098765",
+            "feedback":{"comments":{"edges":[{"node":{"id":"3387654321098765_1122334455",
+            "actor_id":100099887766,"body":"MashaAllah"}}]}}},
+            {"node":{"__typename":"User","id":"77700111222333","name":"A Fan"}},
+            {"node":{"__typename":"Photo","fbid":102233445566778}},
+            {"node":{"__typename":"Video","video_id":998877665544332}}
+        """.trimIndent()
+        val mined = FacebookPostLinks.mineLinksFromPageSource(
+            segmentA + padding + segmentB, "https://m.facebook.com/dawateislami.net"
+        )
+        assertEquals(
+            listOf(
+                "https://m.facebook.com/dawateislami.net/posts/pfbid02QwErTyUiOpAsDfGhJkLzXcVbNm123",
+                "https://m.facebook.com/dawateislami.net/posts/3387654321098765",
+                "https://m.facebook.com/dawateislami.net/videos/998877665544332",
+                "https://m.facebook.com/photo.php?fbid=102233445566778"
+            ),
+            mined
+        )
+    }
+
+    @Test
+    fun `mining pairs story fbid with a neighbouring owner id only`() {
+        val paired = """{"story_fbid":"2938475610293847","id":"100063693365280","x":1}"""
+        assertEquals(
+            listOf("https://m.facebook.com/story.php?story_fbid=2938475610293847&id=100063693365280"),
+            FacebookPostLinks.mineLinksFromPageSource(paired, "https://m.facebook.com/dawateislami.net")
+        )
+        // Unicode-escaped photo URL in the payload.
+        val escaped = """{"url":"https:\u002F\u002Fm.facebook.com\u002Fphoto\u002F?fbid=777888999000111\u0026set=a.123"}"""
+        assertEquals(
+            listOf("https://m.facebook.com/photo/?fbid=777888999000111"),
+            FacebookPostLinks.mineLinksFromPageSource(escaped, "https://m.facebook.com/dawateislami.net")
+        )
+        // Pure junk: counts and short ids mint nothing.
+        val junk = """{"id":123,"count":555555555555,"fbid":42,"video_id":7}"""
+        assertEquals(
+            emptyList<String>(),
+            FacebookPostLinks.mineLinksFromPageSource(junk, "https://m.facebook.com/dawateislami.net")
+        )
     }
 }

@@ -20,7 +20,13 @@ enum class FacebookProfileStatus {
     /** The profile is fine but fewer posts than requested exist / were found. */
     PARTIAL,
 
-    /** The profile loads and is valid, but zero post permalinks exist after the full scroll budget. */
+    /**
+     * The profile loads, its posts area positively rendered, and zero post
+     * permalinks exist after the full effort (attempts + scroll budget).
+     * Never concluded without that positive posts-area evidence — a page
+     * that showed no posts area at all resolves to LOGIN_REQUIRED instead
+     * (the usual cause is a logged-out gate the classifier could not see).
+     */
     NO_POSTS,
 
     /** The profile exists but its content is locked / private. */
@@ -63,7 +69,9 @@ data class FacebookProfileResult(
     val status: FacebookProfileStatus,
     val links: List<String> = emptyList(),
     /** Human-readable detail for non-OK outcomes (never a raw exception). */
-    val note: String? = null
+    val note: String? = null,
+    /** Escalation-ladder record: methods tried in order + which produced [links]. */
+    val methodsSummary: String? = null
 )
 
 /**
@@ -77,6 +85,19 @@ data class FacebookPageSignals(
     val title: String = "",
     /** A password field or a login form is present in the DOM. */
     val hasLoginForm: Boolean = false,
+    /**
+     * A logged-out gate is present WITHOUT a full login form: visible
+     * anchors/CTAs to a login endpoint, or a "See more on Facebook"-style
+     * nag container. This is how m.facebook.com answers logged-out
+     * profile visits — a banner, not a form — so it needs its own signal.
+     */
+    val hasLoginGate: Boolean = false,
+    /**
+     * Positive evidence the posts area rendered: feed/article containers
+     * or a Posts section marker in the DOM. NO_POSTS may only be
+     * concluded when this is true.
+     */
+    val hasPostsArea: Boolean = false,
     /** Excerpt of the visible page text (key phrases are matched against it). */
     val pageText: String = "",
     /** A main-frame load error was recorded for this page (informational; the collector retries before classifying). */
@@ -198,9 +219,12 @@ object FacebookPostLinks {
     //     (also /posts/<id> and /groups/<id>/posts/<id> style prefixes)
     //  2. story.php?story_fbid=<id>          — classic story permalink
     //  3. permalink.php?story_fbid=<id>      — classic permalink endpoint
-    //  4. photo.php?fbid=<id>                — a photo POST on the timeline
-    //     (photo posts link this way; album *views* use /<page>/photos/a.…,
-    //     which is NOT a permalink and is rejected)
+    //  4. photo.php?fbid=<id> and /photo/?fbid=<id> — a photo POST on the
+    //     timeline. Both endpoint shapes exist: photo.php is the classic
+    //     one, /photo/ is the shape modern Facebook serves for photo
+    //     posts (a photo-heavy page's feed is full of them — missing this
+    //     shape was a real extraction hole). Album *views* use
+    //     /<page>/photos/a.…, which is NOT a permalink and is rejected.
     //  5. /<page>/videos/<id> and /watch/?v=<id> — a video post by the profile
     //
     // Everything else is rejected conservatively: profile roots, nav,
@@ -250,6 +274,12 @@ object FacebookPostLinks {
             path.endsWith("/photo.php") -> {
                 val fbid = params["fbid"]?.takeIf { it.isNotBlank() } ?: return null
                 "https://m.facebook.com$path?fbid=$fbid"
+            }
+            path == "/photo" || path == "/photo/" -> {
+                // Modern photo-post shape: /photo/?fbid=<id> (the set=
+                // album context is decoration, like photo.php's).
+                val fbid = params["fbid"]?.takeIf { it.isNotBlank() } ?: return null
+                "https://m.facebook.com/photo/?fbid=$fbid"
             }
             path == "/watch" || path == "/watch/" -> {
                 val v = params["v"]?.takeIf { it.isNotBlank() } ?: return null
@@ -321,6 +351,42 @@ object FacebookPostLinks {
     }
 
     /**
+     * Diagnostic samples for the audit trail. When a scan found anchors
+     * but ZERO matched the permalink patterns, the failure is otherwise
+     * invisible in the trail — so up to [limit] hrefs are recorded with
+     * the probe step. Post-link-LOOKING hrefs (a post-ish marker is
+     * present but the patterns rejected them — the ones that would
+     * reveal a pattern gap) come first; remaining slots fall back to
+     * the first anchors in DOM order (which reveal a timing/render gap:
+     * only nav chrome was in the DOM). Tracking parameters are stripped
+     * and each sample truncated, so the step text stays readable in a
+     * screenshot. Pure.
+     */
+    fun sampleHrefsForDiagnostics(anchorHrefs: List<String>, limit: Int = 10): List<String> {
+        if (anchorHrefs.isEmpty() || limit <= 0) return emptyList()
+        val markers = listOf("posts", "story", "photo", "video", "watch", "pfbid", "fbid", "reel")
+        val looking = anchorHrefs.filter { href ->
+            val lower = href.lowercase(Locale.ROOT)
+            markers.any { lower.contains(it) }
+        }
+        val candidates = (looking + anchorHrefs).map { sanitizeHrefForDiagnostics(it) }
+        return candidates.distinct().take(limit)
+    }
+
+    /** Strips tracking decoration from an href for diagnostic display. */
+    private fun sanitizeHrefForDiagnostics(rawHref: String): String {
+        val uri = parseUri(rawHref.trim()) ?: return rawHref.take(120)
+        val host = uri.host ?: return rawHref.take(120)
+        val params = parseQueryParams(uri.rawQuery ?: "")
+        val keep = listOf("story_fbid", "fbid", "v", "id").mapNotNull { key ->
+            params[key]?.takeIf { it.isNotBlank() }?.let { "$key=$it" }
+        }
+        val base = "https://$host${uri.path ?: ""}" +
+            if (keep.isEmpty()) "" else "?" + keep.joinToString("&")
+        return base.take(120)
+    }
+
+    /**
      * Parses the page-probe JSON produced by BrowserController into
      * [FacebookPageSignals]. [loadError] / [rendererGone] come from the
      * WebViewClient's own records (JS cannot see them).
@@ -339,6 +405,8 @@ object FacebookPostLinks {
                 finalUrl = obj.optString("url", ""),
                 title = obj.optString("title", ""),
                 hasLoginForm = hasPassword || hasLoginForm,
+                hasLoginGate = obj.optBoolean("hasLoginGate", false),
+                hasPostsArea = obj.optBoolean("hasPostsArea", false),
                 pageText = obj.optString("text", ""),
                 loadError = loadError,
                 rendererGone = rendererGone
@@ -371,6 +439,23 @@ object FacebookPostLinks {
         "log in to continue"
     )
 
+    /**
+     * Logged-out NAG phrases — the banner m.facebook.com shows instead of
+     * a feed when there is no session ("See more on Facebook — log in or
+     * sign up…"). Distinct from the full login page's vocabulary: the nag
+     * replaces/truncates the posts area WITHOUT any password field, which
+     * is exactly how a logged-out profile visit used to fall through to
+     * NO_POSTS.
+     */
+    private val LOGIN_NAG_TEXT_PHRASES = listOf(
+        "see more on facebook",
+        "log in or sign up",
+        "sign up to view",
+        "log in to view",
+        "log in to see more",
+        "join facebook to connect"
+    )
+
     private val FB_ERROR_TEXT_PHRASES = listOf(
         "something's gone wrong",
         "something went wrong",
@@ -398,8 +483,9 @@ object FacebookPostLinks {
     /** Classifies a loaded page from its probed [signals]. Pure. */
     fun classifyPage(signals: FacebookPageSignals): FacebookPageClass {
         val text = signals.pageText.lowercase(Locale.ROOT)
-        if (isLoginUrl(signals.finalUrl) || signals.hasLoginForm ||
-            LOGIN_TEXT_PHRASES.any { text.contains(it) }
+        if (isLoginUrl(signals.finalUrl) || signals.hasLoginForm || signals.hasLoginGate ||
+            LOGIN_TEXT_PHRASES.any { text.contains(it) } ||
+            LOGIN_NAG_TEXT_PHRASES.any { text.contains(it) }
         ) {
             return FacebookPageClass.LOGIN_WALL
         }
@@ -431,7 +517,8 @@ object FacebookPostLinks {
         linkCount: Int,
         requestedCount: Int,
         openFailed: Boolean = false,
-        fbFailed: Boolean = false
+        fbFailed: Boolean = false,
+        postsAreaRendered: Boolean = false
     ): FacebookProfileStatus = when {
         openFailed -> FacebookProfileStatus.OPEN_FAILED
         fbFailed -> FacebookProfileStatus.FB_ERROR
@@ -441,7 +528,15 @@ object FacebookPostLinks {
         pageClass == FacebookPageClass.PROFILE_UNAVAILABLE -> FacebookProfileStatus.PROFILE_UNAVAILABLE
         linkCount >= requestedCount -> FacebookProfileStatus.OK
         linkCount > 0 -> FacebookProfileStatus.PARTIAL
-        else -> FacebookProfileStatus.NO_POSTS
+        // Zero links on a content page. NO_POSTS is only honest when the
+        // posts area positively rendered and stayed empty through the
+        // full attempt effort. A page that never showed a posts area was
+        // most likely gated (logged-out nag in a shape the classifier
+        // could not see, a tab other than Posts, a feed that never
+        // rendered) — blaming the profile would be a lie, so the run
+        // reports the actionable state instead: log in / look by hand.
+        postsAreaRendered -> FacebookProfileStatus.NO_POSTS
+        else -> FacebookProfileStatus.LOGIN_REQUIRED
     }
 
     /**
@@ -460,8 +555,181 @@ object FacebookPostLinks {
             pageClass = classifyPage(signals),
             linkCount = linkCount,
             requestedCount = requestedCount,
-            openFailed = openFailed
+            openFailed = openFailed,
+            postsAreaRendered = signals.hasPostsArea
         )
+    }
+
+    // ------------------------------------------------------------------
+    // Escalation ladder helpers (M1→M5 sequencing — pure)
+    // ------------------------------------------------------------------
+
+    /** One ladder method's harvest: the method label + its own ordered link set. */
+    data class MethodYield(val method: String, val links: List<String>)
+
+    /**
+     * The method whose set becomes the profile's final set: the largest
+     * harvest wins; ties keep the EARLIEST method (its order is closest
+     * to the visible feed's latest-first order).
+     */
+    fun selectBestYield(yields: List<MethodYield>): MethodYield? =
+        yields.maxByOrNull { it.links.size }
+
+    /** The ladder continues only while the best harvest is short AND budget remains. */
+    fun shouldEscalate(bestLinkCount: Int, requestedCount: Int, budgetLeftMs: Long): Boolean =
+        bestLinkCount < requestedCount && budgetLeftMs > 0
+
+    /** [url] re-hosted onto another facebook host (www / mbasic variants). */
+    fun hostVariant(url: String, host: String): String {
+        val uri = parseUri(url) ?: return url
+        val current = uri.host ?: return url
+        if (!current.endsWith("facebook.com")) return url
+        val query = uri.rawQuery?.let { "?$it" } ?: ""
+        return "https://$host${uri.path ?: ""}$query"
+    }
+
+    /**
+     * M2: the profile's own Posts-section anchor, as actually present in
+     * the rendered page's anchors — an href is NEVER invented. Matches a
+     * `/…/posts` section root for THIS profile, or the profile URL with
+     * `sk=posts`. Post permalinks themselves are excluded (they have an
+     * id segment after /posts).
+     */
+    fun findPostsSectionAnchor(anchorHrefs: List<String>, profileUrl: String): String? {
+        val profileUri = parseUri(profileUrl) ?: return null
+        val profilePath = (profileUri.path ?: "").trimEnd('/')
+        if (profilePath.isBlank()) return null
+        val profileId = parseQueryParams(profileUri.rawQuery ?: "")["id"]
+        for (href in anchorHrefs) {
+            val uri = parseUri(href) ?: continue
+            val host = uri.host?.lowercase(Locale.ROOT) ?: continue
+            if (host != "facebook.com" && !host.endsWith(".facebook.com")) continue
+            if (normalizePostUrl(href) != null) continue // a permalink, not a section
+            val path = (uri.path ?: "").trimEnd('/')
+            if (path == "$profilePath/posts") return href
+            if (path == profilePath) {
+                val params = parseQueryParams(uri.rawQuery ?: "")
+                if (params["sk"] == "posts" &&
+                    (profileId == null || params["id"] == profileId)
+                ) {
+                    return href
+                }
+            }
+        }
+        return null
+    }
+
+    /** M5: the first "See more…" pagination anchor (mbasic) among [anchorsWithText]. */
+    fun findSeeMoreHref(anchorsWithText: List<Pair<String, String>>): String? {
+        for ((href, text) in anchorsWithText) {
+            if (text.trim().lowercase(Locale.ROOT).contains("see more") && isFacebookUrl(href)) {
+                return href
+            }
+        }
+        return null
+    }
+
+    // ------------------------------------------------------------------
+    // M3 — page-source mining (pure)
+    // ------------------------------------------------------------------
+    //
+    // Facebook embeds its feed as JSON inside the page source, with URLs
+    // escaped (\/ and \uXXXX). The miner unescapes first, then accepts,
+    // IN PRIORITY ORDER:
+    //   0. literal "permalink_url" values — the canonical links exactly
+    //      as Facebook itself stores them (gold);
+    //   1. full/path URLs that pass the normal permalink patterns;
+    //   2. story_fbid values paired with an owner "id" in a ±200-char
+    //      window (an unpaired story_fbid is NOT turned into a link —
+    //      a wrong link is worse than a missing one);
+    //   3. top_level_post_id values, constructed onto THIS profile's
+    //      /posts/ path (the id names a post rendered on this profile);
+    //   4. "fbid" keys (photo ids) → photo permalinks;
+    //   5. "video_id" keys → THIS profile's /videos/<id>.
+    // Precision rule: bare numbers under any OTHER key (actor_id,
+    // comment ids, user ids, counts) are NEVER read — only the named
+    // keys above can mint a link.
+
+    private const val MAX_MINING_CHARS = 2_000_000
+    private val PERMALINK_URL_REGEX = Regex(""""permalink_url"\s*:\s*"([^"]+)"""")
+    private val FULL_URL_REGEX = Regex("""https?://[^\s"'<>\\]+""")
+    private val PATH_POST_REGEX = Regex("""/(?:[A-Za-z0-9._~%-]+/)*?(?:posts|videos)/[A-Za-z0-9_-]+""")
+    private val PATH_ENDPOINT_REGEX = Regex(
+        """/(?:story|permalink)\.php\?story_fbid=[A-Za-z0-9_-]+(?:&id=\d+)?""" +
+            """|/photo\.php\?fbid=\d+|/photo/\?fbid=\d+|/watch/\?v=[A-Za-z0-9_-]+"""
+    )
+    private val TOP_LEVEL_POST_ID_REGEX = Regex(""""top_level_post_id"\s*:\s*"?(\d{8,}|pfbid[A-Za-z0-9_-]+)"?""")
+    private val STORY_FBID_REGEX = Regex(""""story_fbid"\s*:\s*"?([A-Za-z0-9_-]{6,})"?""")
+    private val OWNER_ID_REGEX = Regex(""""id"\s*:\s*"?(\d{8,})"?""")
+    private val FBID_KEY_REGEX = Regex(""""fbid"\s*:\s*"?(\d{8,})"?""")
+    private val VIDEO_ID_REGEX = Regex(""""video_id"\s*:\s*"?(\d{8,})"?""")
+    private val UNICODE_ESCAPE_REGEX = Regex("""\\u([0-9a-fA-F]{4})""")
+
+    /** Undoes Facebook's JSON escaping: `\/` → `/`, `&amp;` → `&`, `\uXXXX` → the char. */
+    private fun unescapeFacebookPayload(raw: String): String {
+        var out = raw.replace("\\/", "/").replace("&amp;", "&")
+        out = UNICODE_ESCAPE_REGEX.replace(out) { m ->
+            val code = m.groupValues[1].toIntOrNull(16)
+            if (code == null) m.value else code.toChar().toString()
+        }
+        return out
+    }
+
+    /**
+     * Mines [source] (raw page HTML/source) for post permalinks of the
+     * profile at [profileUrl]. Deterministic order = discovery order;
+     * every candidate passes [normalizePostUrl] before it counts.
+     */
+    fun mineLinksFromPageSource(source: String?, profileUrl: String): List<String> {
+        if (source.isNullOrBlank()) return emptyList()
+        val capped = if (source.length > MAX_MINING_CHARS) source.substring(0, MAX_MINING_CHARS) else source
+        val text = unescapeFacebookPayload(capped)
+        val found = LinkedHashSet<String>()
+        fun add(raw: String?) {
+            if (raw != null) normalizePostUrl(raw)?.let { found.add(it) }
+        }
+        // 0) permalink_url — Facebook's own canonical links, first.
+        for (m in PERMALINK_URL_REGEX.findAll(text)) {
+            add(m.groupValues[1])
+        }
+        // 1) Full URLs (after unescaping, escaped payload URLs are whole).
+        for (m in FULL_URL_REGEX.findAll(text)) {
+            add(m.value.trimEnd(',', ']', '}', ')'))
+        }
+        // 1b) Path-only post/endpoint shapes (host prepended; normalize validates).
+        for (m in PATH_POST_REGEX.findAll(text)) {
+            add("https://m.facebook.com" + m.value)
+        }
+        for (m in PATH_ENDPOINT_REGEX.findAll(text)) {
+            add("https://m.facebook.com" + m.value)
+        }
+        // 2) story_fbid ONLY when an owner id sits in the same neighbourhood.
+        for (m in STORY_FBID_REGEX.findAll(text)) {
+            val windowStart = maxOf(0, m.range.first - 200)
+            val windowEnd = minOf(text.length, m.range.last + 201)
+            val owner = OWNER_ID_REGEX.find(text.substring(windowStart, windowEnd))
+                ?.groupValues?.get(1)
+            if (owner != null) {
+                add("https://m.facebook.com/story.php?story_fbid=${m.groupValues[1]}&id=$owner")
+            }
+        }
+        // 3–5) Id-key constructions. top_level_post_id / video_id need
+        //      THIS profile's path — vanity profiles only (profile.php
+        //      has no /posts/ or /videos/ root).
+        val profilePath = (parseUri(profileUrl)?.path ?: "").trimEnd('/')
+        if (profilePath.isNotBlank() && !profilePath.endsWith("profile.php")) {
+            for (m in TOP_LEVEL_POST_ID_REGEX.findAll(text)) {
+                add("https://m.facebook.com$profilePath/posts/${m.groupValues[1]}")
+            }
+            for (m in VIDEO_ID_REGEX.findAll(text)) {
+                add("https://m.facebook.com$profilePath/videos/${m.groupValues[1]}")
+            }
+        }
+        // 4) "fbid" keys are photo ids in Facebook payloads.
+        for (m in FBID_KEY_REGEX.findAll(text)) {
+            add("https://m.facebook.com/photo.php?fbid=${m.groupValues[1]}")
+        }
+        return found.toList()
     }
 
     // ------------------------------------------------------------------
@@ -510,6 +778,9 @@ object FacebookPostLinks {
                 .append(if (result.links.size == 1) " link" else " links").append(")\n")
             if (!result.note.isNullOrBlank()) {
                 sb.append(result.note).append("\n")
+            }
+            if (!result.methodsSummary.isNullOrBlank()) {
+                sb.append("Methods: ").append(result.methodsSummary).append("\n")
             }
             if (result.links.isEmpty()) {
                 sb.append("_No links collected._\n")

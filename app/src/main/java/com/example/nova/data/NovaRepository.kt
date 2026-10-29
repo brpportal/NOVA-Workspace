@@ -19,6 +19,7 @@ import com.example.nova.trained.FacebookCollectRunResult
 import com.example.nova.trained.FacebookLinksCollector
 import com.example.nova.trained.FacebookPostLinks
 import com.example.nova.trained.FacebookProfileResult
+import com.example.nova.trained.FacebookProfileStatus
 import com.example.nova.security.PermissionManager
 import com.example.nova.security.VaultManager
 import com.example.nova.workspace.WorkspaceManager
@@ -710,6 +711,7 @@ class NovaRepository(
             var terminalStatus = "COMPLETED"
             var terminalError: String? = null
             var stopNote: String? = null
+            var loginStoppedLabel: String? = null
 
             suspend fun recordStep(message: String) {
                 try {
@@ -820,6 +822,17 @@ class NovaRepository(
                 if (outcome.stoppedEarly) {
                     terminalStatus = "FAILED"
                     terminalError = outcome.stopReason
+                    if (outcome.stoppedForLogin) {
+                        // FIX 4: a login-stopped run must SAY so on the
+                        // task's final line — the profile waiting on the
+                        // login plus every profile never attempted count
+                        // as pending.
+                        val pending = profiles.size - collected.count {
+                            it.status != FacebookProfileStatus.LOGIN_REQUIRED
+                        }
+                        loginStoppedLabel = "Stopped — waiting for login " +
+                            "($pending profile${if (pending == 1) "" else "s"} pending)"
+                    }
                 }
             } catch (e: CancellationException) {
                 // Stop Task: whatever was collected is still written below.
@@ -868,7 +881,7 @@ class NovaRepository(
                         currentOperation = if (terminalStatus == "COMPLETED") {
                             "Done — $summary"
                         } else {
-                            terminalError ?: stopNote ?: "Stopped"
+                            loginStoppedLabel ?: terminalError ?: stopNote ?: "Stopped"
                         },
                         errorMessage = if (terminalStatus == "FAILED") (terminalError ?: stopNote) else null,
                         createdFilesJson = writtenPath?.let { org.json.JSONArray(listOf(it)).toString() },
@@ -893,7 +906,8 @@ class NovaRepository(
                 results = collected.toList(),
                 resultFilePath = writtenPath,
                 running = false,
-                summaryLine = summary + (stopNote?.let { " Stopped early: $it" } ?: "")
+                summaryLine = loginStoppedLabel
+                    ?: (summary + (stopNote?.let { " Stopped early: $it" } ?: ""))
             )
         }
         agentLoop.registerJob(taskId, job)
