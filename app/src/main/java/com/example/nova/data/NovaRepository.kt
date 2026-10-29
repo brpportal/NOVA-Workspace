@@ -1218,7 +1218,7 @@ class NovaRepository(
             try {
                 if (taskDao.getTaskById(taskId) != null) {
                     workspaceManager.createDirectory(runRel)
-                    fun registerExisting(relPath: String): Boolean {
+                    suspend fun registerExisting(relPath: String): Boolean {
                         return try {
                             val meta = workspaceManager.getFileMetadata(relPath)
                             agentCreatedFileDao.insertCreatedFile(
