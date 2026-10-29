@@ -131,7 +131,7 @@ fun BrowserScreen(
 
     val bookmarks by repository.bookmarks.collectAsState(initial = emptyList())
     val tasks by repository.tasks.collectAsState(initial = emptyList())
-    val runningBrowserTask = tasks.firstOrNull { it.status == "RUNNING" || it.status == "PENDING" }
+    val runningBrowserTask = tasks.firstOrNull { it.status == "RUNNING" || it.status == "PENDING" || it.status == "WAITING" }
 
     LaunchedEffect(tabState.url) {
         urlInputText = tabState.url

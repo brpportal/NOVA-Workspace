@@ -230,6 +230,20 @@ object ToolDefinitions {
             parametersSchemaJson = """{ "type": "object", "properties": {} }"""
         ),
         AIToolDefinition(
+            name = "collect_facebook_post_links",
+            description = "Trained Task #1: collects the latest post links of ONE Facebook profile, deterministically (no browsing decisions needed). Give a profile URL; it visits the profile, scrolls, and returns up to `count` post permalinks (default 5, allowed 3-7), latest first, tracking parameters stripped, plus a precise status: OK (all found), PARTIAL (fewer exist), NO_POSTS, PROFILE_LOCKED, PROFILE_UNAVAILABLE, OPEN_FAILED, FB_ERROR, or LOGIN_REQUIRED. The result is also saved to a markdown file in AI-Tasks/. If the status is LOGIN_REQUIRED, Facebook needs the user to log in: tell the user, do NOT ask for or enter any credentials, and do not retry in a loop. Call once per profile when the user asks for several profiles. Never invent or guess links — report exactly what this tool returns.",
+            parametersSchemaJson = """
+            {
+                "type": "object",
+                "properties": {
+                    "profile_url": { "type": "string", "description": "Facebook profile URL, e.g. https://www.facebook.com/some.page or a profile.php?id=... link" },
+                    "count": { "type": "integer", "description": "How many latest post links to collect (3-7, default 5)" }
+                },
+                "required": ["profile_url"]
+            }
+            """.trimIndent()
+        ),
+        AIToolDefinition(
             name = "task_record_artifact",
             description = "Saves an artifact (screenshot, extracted note, or file) to the active task folder in /AI-Tasks/.",
             parametersSchemaJson = """

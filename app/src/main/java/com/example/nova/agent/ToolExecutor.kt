@@ -5,6 +5,8 @@ import com.example.nova.data.MemoryDao
 import com.example.nova.data.MemoryEntryEntity
 import com.example.nova.security.SecretRedactor
 import com.example.nova.security.VaultManager
+import com.example.nova.trained.FacebookLinksCollector
+import com.example.nova.trained.FacebookPostLinks
 import com.example.nova.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -186,6 +188,48 @@ class ToolExecutor(
                 "clear_set_of_marks" -> {
                     val res = browserController.clearSetOfMarks()
                     ToolExecutionResult(res.success, res.message, error = res.error)
+                }
+                "collect_facebook_post_links" -> {
+                    // Trained Task #1 (AI mode): the SAME deterministic
+                    // core as the Tasks-screen collector, for ONE profile.
+                    // AI-mode hooks never pause the run: a login wall
+                    // returns LOGIN_REQUIRED at once — the model must hand
+                    // it to the user; credentials are never touched.
+                    val profileUrl = arguments.optString("profile_url").trim()
+                    val requested = arguments.optInt("count", FacebookPostLinks.DEFAULT_POSTS_PER_PROFILE)
+                        .coerceIn(FacebookPostLinks.MIN_POSTS_PER_PROFILE, FacebookPostLinks.MAX_POSTS_PER_PROFILE)
+                    if (profileUrl.isBlank()) {
+                        ToolExecutionResult(false, "profile_url is required", error = "profile_url is required")
+                    } else {
+                        val aiHooks = object : FacebookLinksCollector.Hooks {
+                            override suspend fun onStep(message: String) {}
+                            override suspend fun onWaitStart(reason: String) {}
+                            override suspend fun onWaitEnd(resumed: Boolean) {}
+                            override suspend fun onLoginWall(profileUrl: String) =
+                                FacebookLinksCollector.LoginWallDecision.SKIP_PROFILE
+                        }
+                        val result = FacebookLinksCollector(browserController)
+                            .collectOne(profileUrl, requested, aiHooks)
+                        val nowDate = java.util.Date()
+                        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(nowDate)
+                        val rel = "AI-Tasks/facebook-post-links-$stamp.md"
+                        workspaceManager.createDirectory("AI-Tasks")
+                        val saved = workspaceManager.writeFile(
+                            rel,
+                            FacebookPostLinks.formatResultsMarkdown(listOf(result), requested, nowDate, null)
+                        )
+                        val sb = StringBuilder()
+                        sb.append("Profile: ").append(result.normalizedUrl.ifBlank { result.profile }).append('\n')
+                        sb.append("Status: ").append(result.status.name)
+                        result.note?.let { sb.append(" — ").append(it) }
+                        sb.append('\n')
+                        sb.append("Links (").append(result.links.size).append("):\n")
+                        result.links.forEachIndexed { i, link ->
+                            sb.append(i + 1).append(". ").append(link).append('\n')
+                        }
+                        if (saved) sb.append("Saved: ").append(rel)
+                        ToolExecutionResult(true, sb.toString(), outputFiles = if (saved) listOf(rel) else emptyList())
+                    }
                 }
                 "task_record_artifact" -> {
                     val fileName = arguments.getString("file_name")

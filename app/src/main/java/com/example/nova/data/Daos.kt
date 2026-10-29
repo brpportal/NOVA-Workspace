@@ -73,7 +73,7 @@ interface TaskDao {
     @Query("SELECT * FROM agent_tasks ORDER BY updatedAt DESC")
     fun getAllTasks(): Flow<List<AgentTaskEntity>>
 
-    @Query("SELECT * FROM agent_tasks WHERE status IN ('PENDING', 'RUNNING', 'WAITING_APPROVAL', 'PAUSED') ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM agent_tasks WHERE status IN ('PENDING', 'RUNNING', 'WAITING_APPROVAL', 'WAITING', 'PAUSED') ORDER BY updatedAt DESC")
     fun getActiveTasks(): Flow<List<AgentTaskEntity>>
 
     @Query("SELECT * FROM agent_tasks WHERE goalId = :goalId ORDER BY createdAt DESC")

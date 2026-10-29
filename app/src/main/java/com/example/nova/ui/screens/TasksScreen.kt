@@ -38,7 +38,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
@@ -48,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -58,7 +61,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -70,6 +76,8 @@ import com.example.nova.data.AgentTaskEntity
 import com.example.nova.data.ApprovalRecordEntity
 import com.example.nova.data.NovaRepository
 import com.example.nova.data.TaskStepEntity
+import com.example.nova.trained.FacebookPostLinks
+import com.example.nova.trained.FacebookProfileStatus
 import com.example.ui.theme.StoneLight
 import com.example.ui.theme.StoneMuted
 import com.example.ui.theme.WarmAccent
@@ -80,6 +88,8 @@ import com.example.ui.theme.WarmWarning
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 data class AuditTimelineEvent(
     val timestamp: Long,
@@ -102,7 +112,7 @@ fun TasksScreen(
 
     val filteredTasks = remember(tasks, selectedFilterIndex) {
         when (selectedFilterIndex) {
-            1 -> tasks.filter { it.status == "RUNNING" || it.status == "PENDING" || it.status == "PAUSED" }
+            1 -> tasks.filter { it.status == "RUNNING" || it.status == "PENDING" || it.status == "PAUSED" || it.status == "WAITING" }
             2 -> tasks.filter { it.status == "WAITING_APPROVAL" }
             3 -> tasks.filter { (it.cadence != "RUN_ONCE" || it.nextRunTime != null) && it.status != "CANCELLED" }
                 .sortedBy { it.nextRunTime ?: Long.MAX_VALUE }
@@ -192,6 +202,12 @@ fun TasksScreen(
                     .padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                if (selectedFilterIndex == 0) {
+                    item {
+                        TrainedTasksSection(repository = repository)
+                    }
+                }
+
                 items(filteredTasks, key = { it.id }) { task ->
                     TaskCardItem(
                         task = task,
@@ -555,7 +571,7 @@ fun TaskCardItem(
 
                 Spacer(modifier = Modifier.weight(1f))
 
-                if (task.status == "RUNNING" || task.status == "PENDING") {
+                if (task.status == "RUNNING" || task.status == "PENDING" || task.status == "WAITING") {
                     IconButton(
                         onClick = { repository.cancelTask(task.id) },
                         modifier = Modifier.size(32.dp).testTag("cancel_task_button_${task.id}")
@@ -711,11 +727,203 @@ fun AuditTimelineRow(event: AuditTimelineEvent) {
     }
 }
 
+/**
+ * TRAINED TASKS — pre-programmed, deterministic automations that run
+ * with zero AI calls. Trained Task #1: the Facebook Post Links
+ * Collector (Mode 1 form + live result view).
+ */
+@Composable
+fun TrainedTasksSection(repository: NovaRepository) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+    val runState by repository.lastFacebookCollectRun.collectAsState()
+
+    var profilesText by remember { mutableStateOf("") }
+    var postsPerProfile by remember { mutableIntStateOf(FacebookPostLinks.DEFAULT_POSTS_PER_PROFILE) }
+    var saveList by remember { mutableStateOf(true) }
+    var prefilled by remember { mutableStateOf(false) }
+
+    // Prefill from the saved list once (never overwrites typed text).
+    LaunchedEffect(Unit) {
+        if (!prefilled) {
+            prefilled = true
+            val saved = withContext(Dispatchers.IO) { repository.loadSavedFacebookProfiles() }
+            if (saved.isNotBlank() && profilesText.isBlank()) {
+                profilesText = saved
+            }
+        }
+    }
+
+    val profileLines = profilesText.lines().map { it.trim() }.filter { it.isNotBlank() }
+    val running = runState?.running == true
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, StoneLight)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "⚡ Trained Tasks",
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+            )
+            Text(
+                text = "Facebook Post Links Collector — trained task, runs WITHOUT AI. It visits each profile in order and copies the links of its latest posts. If Facebook asks for a login, the run pauses as Needs you: log in in the Browser tab and hand control back.",
+                style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted)
+            )
+
+            OutlinedTextField(
+                value = profilesText,
+                onValueChange = { profilesText = it },
+                label = { Text("Profile URLs — one per line") },
+                placeholder = { Text("https://www.facebook.com/some.page") },
+                minLines = 4,
+                maxLines = 8,
+                enabled = !running,
+                modifier = Modifier.fillMaxWidth().testTag("fb_collector_profiles_field")
+            )
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Posts per profile",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                OutlinedButton(
+                    onClick = { postsPerProfile = (postsPerProfile - 1).coerceAtLeast(FacebookPostLinks.MIN_POSTS_PER_PROFILE) },
+                    enabled = !running && postsPerProfile > FacebookPostLinks.MIN_POSTS_PER_PROFILE
+                ) { Text("−") }
+                Text(
+                    text = postsPerProfile.toString(),
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    modifier = Modifier.testTag("fb_collector_count")
+                )
+                OutlinedButton(
+                    onClick = { postsPerProfile = (postsPerProfile + 1).coerceAtMost(FacebookPostLinks.MAX_POSTS_PER_PROFILE) },
+                    enabled = !running && postsPerProfile < FacebookPostLinks.MAX_POSTS_PER_PROFILE
+                ) { Text("+") }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(
+                    checked = saveList,
+                    onCheckedChange = { saveList = it },
+                    enabled = !running,
+                    modifier = Modifier.testTag("fb_collector_save_toggle")
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Save this list for next time",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+
+            Button(
+                onClick = {
+                    repository.launchFacebookPostLinksCollector(profileLines, postsPerProfile, saveList)
+                    android.widget.Toast.makeText(context, "Collector started — watch the task below", android.widget.Toast.LENGTH_SHORT).show()
+                },
+                enabled = profileLines.isNotEmpty() && !running,
+                modifier = Modifier.fillMaxWidth().testTag("fb_collector_run_button")
+            ) {
+                Text(if (running) "Collecting…" else "Run Collector")
+            }
+
+            val state = runState
+            if (state != null) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = state.summaryLine
+                        ?: "Collecting… ${state.results.size} of ${state.totalProfiles} profiles done",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    modifier = Modifier.testTag("fb_collector_summary")
+                )
+                state.resultFilePath?.let { path ->
+                    Text(
+                        text = "Saved: $path",
+                        style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted, fontFamily = FontFamily.Monospace)
+                    )
+                }
+
+                state.results.forEach { result ->
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FacebookStatusChip(result.status)
+                            Text(
+                                text = "${result.links.size} link${if (result.links.size == 1) "" else "s"}",
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                            )
+                        }
+                        Text(
+                            text = result.normalizedUrl.ifBlank { result.profile },
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, color = StoneMuted)
+                        )
+                        result.note?.let { note ->
+                            Text(
+                                text = note,
+                                style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted)
+                            )
+                        }
+                        result.links.forEachIndexed { index, link ->
+                            Text(
+                                text = "${index + 1}. $link",
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                            )
+                        }
+                    }
+                }
+
+                val allLinks = state.results.flatMap { it.links }
+                if (allLinks.isNotEmpty()) {
+                    OutlinedButton(
+                        onClick = {
+                            clipboardManager.setText(AnnotatedString(allLinks.joinToString("\n")))
+                            android.widget.Toast.makeText(context, "${allLinks.size} links copied", android.widget.Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("fb_collector_copy_button")
+                    ) {
+                        Text("Copy all links (${allLinks.size})")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun FacebookStatusChip(status: FacebookProfileStatus) {
+    val (bgColor, textColor) = when (status) {
+        FacebookProfileStatus.OK -> WarmSuccess.copy(alpha = 0.15f) to WarmSuccess
+        FacebookProfileStatus.PARTIAL -> WarmWarning.copy(alpha = 0.15f) to WarmWarning
+        FacebookProfileStatus.NO_POSTS -> StoneLight.copy(alpha = 0.25f) to StoneMuted
+        FacebookProfileStatus.LOGIN_REQUIRED -> WarmWarning.copy(alpha = 0.15f) to WarmWarning
+        else -> WarmError.copy(alpha = 0.15f) to WarmError
+    }
+    Surface(color = bgColor, shape = RoundedCornerShape(12.dp)) {
+        Text(
+            text = status.name,
+            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, color = textColor),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+        )
+    }
+}
+
 @Composable
 fun TaskStatusBadge(status: String) {
     val (bgColor, textColor, label) = when (status) {
         "RUNNING" -> Triple(WarmAccentContainer, WarmAccent, "RUNNING")
         "WAITING_APPROVAL" -> Triple(WarmWarning.copy(alpha = 0.15f), WarmWarning, "NEEDS YOU")
+        "WAITING" -> Triple(WarmWarning.copy(alpha = 0.15f), WarmWarning, "NEEDS YOU")
         "COMPLETED" -> Triple(WarmSuccess.copy(alpha = 0.15f), WarmSuccess, "COMPLETED")
         "FAILED" -> Triple(WarmError.copy(alpha = 0.15f), WarmError, "FAILED")
         "SAFETY_STOPPED" -> Triple(WarmError.copy(alpha = 0.15f), WarmError, "Stopped — safety could not be confirmed")

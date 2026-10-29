@@ -12,11 +12,17 @@ import com.example.nova.ai.AIProviderAdapter
 import com.example.nova.ai.AIProviderFactory
 import com.example.nova.ai.FakeAIProvider
 import com.example.nova.ai.ProviderErrors
+import com.example.nova.browser.BrowserControlMode
 import com.example.nova.browser.BrowserController
 import com.example.nova.notifications.TaskNotificationHelper
+import com.example.nova.trained.FacebookCollectRunResult
+import com.example.nova.trained.FacebookLinksCollector
+import com.example.nova.trained.FacebookPostLinks
+import com.example.nova.trained.FacebookProfileResult
 import com.example.nova.security.PermissionManager
 import com.example.nova.security.VaultManager
 import com.example.nova.workspace.WorkspaceManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -25,7 +31,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 
 class NovaRepository(
     private val context: Context,
@@ -419,6 +429,9 @@ class NovaRepository(
         /** Prefix of the honest "no real provider" system notice in chat. */
         const val SYSTEM_NOTICE_PREFIX = "⚠️ **System notice — not an AI reply.**"
 
+        /** Workspace file holding the collector's saved profile list. */
+        const val FACEBOOK_PROFILES_FILE = "AI-Tasks/facebook-profiles.txt"
+
         @Volatile
         private var INSTANCE: NovaRepository? = null
 
@@ -632,6 +645,262 @@ class NovaRepository(
             )
             taskDao.updateTask(updated)
         }
+    }
+
+    /** Live state of the latest Trained Task #1 run (Mode 1), for the Tasks UI. */
+    val lastFacebookCollectRun = MutableStateFlow<FacebookCollectRunResult?>(null)
+
+    /** The saved profile list for the collector form (blank when none saved yet). */
+    fun loadSavedFacebookProfiles(): String =
+        try {
+            workspaceManager.readFile(FACEBOOK_PROFILES_FILE)
+        } catch (e: Exception) {
+            ""
+        }
+
+    /**
+     * TRAINED TASK #1 (Mode 1) — Facebook Post Links Collector, launched
+     * from the Tasks screen. Fully deterministic: ZERO provider/LLM
+     * calls. The chain visits every profile in order and records the
+     * exact per-profile status; it pauses ONLY on a login wall (task
+     * WAITING / Needs you + notification, until the user logs in and
+     * hands control back). The result is written to
+     * AI-Tasks/facebook-post-links-<yyyyMMdd-HHmm>.md and registered
+     * under Files → Created by Spark. Returns the task id immediately;
+     * the run is cancellable via the normal Stop Task path.
+     */
+    fun launchFacebookPostLinksCollector(
+        rawProfiles: List<String>,
+        count: Int,
+        saveList: Boolean
+    ): String {
+        val profiles = rawProfiles.map { it.trim() }.filter { it.isNotBlank() }
+        val safeCount = count.coerceIn(
+            FacebookPostLinks.MIN_POSTS_PER_PROFILE,
+            FacebookPostLinks.MAX_POSTS_PER_PROFILE
+        )
+        val taskId = UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+        val fileStamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date(now))
+        val resultRelPath = "AI-Tasks/facebook-post-links-$fileStamp.md"
+
+        val task = AgentTaskEntity(
+            id = taskId,
+            title = "Facebook Post Links Collector",
+            description = "Trained task (no AI): collect the latest $safeCount post links from ${profiles.size} Facebook profile(s).",
+            prompt = "Trained task — Facebook Post Links Collector. ${profiles.size} profile(s), $safeCount post link(s) each. Runs deterministically without AI; pauses as Needs you only on a Facebook login wall.",
+            status = "PENDING",
+            priority = "NORMAL",
+            progress = 0,
+            currentOperation = "Starting collector",
+            createdAt = now,
+            updatedAt = now
+        )
+
+        lastFacebookCollectRun.value = FacebookCollectRunResult(
+            taskId = taskId,
+            requestedCount = safeCount,
+            totalProfiles = profiles.size,
+            running = true
+        )
+
+        val collector = FacebookLinksCollector(browserController)
+
+        val job = scope.launch {
+            val stepCounter = AtomicInteger(0)
+            val collected = mutableListOf<FacebookProfileResult>()
+            var terminalStatus = "COMPLETED"
+            var terminalError: String? = null
+            var stopNote: String? = null
+
+            suspend fun recordStep(message: String) {
+                try {
+                    taskDao.insertStep(
+                        TaskStepEntity(
+                            taskId = taskId,
+                            stepNumber = stepCounter.incrementAndGet(),
+                            description = message,
+                            toolName = "facebook_post_links_collector",
+                            status = "COMPLETED"
+                        )
+                    )
+                    val t = taskDao.getTaskById(taskId)
+                    if (t != null && (t.status == "RUNNING" || t.status == "PENDING")) {
+                        taskDao.updateTask(t.copy(currentOperation = message, updatedAt = System.currentTimeMillis()))
+                    }
+                } catch (ignored: Exception) {
+                }
+            }
+
+            suspend fun setTaskStatus(status: String, operation: String? = null) {
+                val t = taskDao.getTaskById(taskId) ?: return
+                taskDao.updateTask(
+                    t.copy(
+                        status = status,
+                        currentOperation = operation ?: t.currentOperation,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+            }
+
+            // Enters the Needs-you state: task WAITING (fires the "Needs
+            // you" notification) and, unless the user already holds the
+            // browser, the control mode that makes the Browser screen
+            // offer its hand-back bar.
+            suspend fun enterNeedsYou(operation: String) {
+                setTaskStatus("WAITING", operation)
+                if (browserController.controlMode.value != BrowserControlMode.MANUAL_CONTROL) {
+                    browserController.updateControlMode(BrowserControlMode.WAITING_APPROVAL)
+                }
+            }
+
+            val hooks = object : FacebookLinksCollector.Hooks {
+                override suspend fun onStep(message: String) = recordStep(message)
+
+                override suspend fun onWaitStart(reason: String) {
+                    recordStep(reason)
+                    enterNeedsYou("Needs you — hand the browser back to continue collecting")
+                    // The collector itself polls for the hand-back.
+                }
+
+                override suspend fun onWaitEnd(resumed: Boolean) {
+                    if (resumed) setTaskStatus("RUNNING", "Resumed after hand-back")
+                }
+
+                override suspend fun onLoginWall(profileUrl: String): FacebookLinksCollector.LoginWallDecision {
+                    recordStep("Login wall at $profileUrl — Needs you: log in to Facebook in the Browser tab, then hand control back")
+                    enterNeedsYou("Needs you — log in to Facebook")
+                    // Poll here (the collector does not poll for login):
+                    // hand-back → retry this profile; cancel/timeout →
+                    // stop the run honestly.
+                    val deadline = System.currentTimeMillis() + FacebookLinksCollector.CONTROL_WAIT_TIMEOUT_MS
+                    while (System.currentTimeMillis() < deadline) {
+                        val t = taskDao.getTaskById(taskId)
+                        if (t == null || t.status == "CANCELLED") {
+                            return FacebookLinksCollector.LoginWallDecision.STOP_RUN
+                        }
+                        when (browserController.controlMode.value) {
+                            BrowserControlMode.AGENT_ACTIVE -> {
+                                setTaskStatus("RUNNING", "Login done — resuming collection")
+                                return FacebookLinksCollector.LoginWallDecision.RETRY_PROFILE
+                            }
+                            BrowserControlMode.STANDBY ->
+                                return FacebookLinksCollector.LoginWallDecision.STOP_RUN
+                            else -> delay(600)
+                        }
+                    }
+                    return FacebookLinksCollector.LoginWallDecision.STOP_RUN
+                }
+            }
+
+            try {
+                taskDao.insertTask(task)
+                if (saveList) {
+                    try {
+                        workspaceManager.createDirectory("AI-Tasks")
+                        workspaceManager.writeFile(FACEBOOK_PROFILES_FILE, profiles.joinToString("\n"))
+                    } catch (ignored: Exception) {
+                    }
+                }
+                setTaskStatus("RUNNING", "Collecting post links")
+                recordStep("Collector started: ${profiles.size} profile(s), $safeCount link(s) each — no AI, deterministic run")
+
+                val outcome = collector.collectAll(profiles, safeCount, hooks) { result ->
+                    collected.add(result)
+                    val t = taskDao.getTaskById(taskId)
+                    if (t != null && t.status != "CANCELLED") {
+                        taskDao.updateTask(
+                            t.copy(
+                                progress = collected.size * 100 / profiles.size.coerceAtLeast(1),
+                                updatedAt = System.currentTimeMillis()
+                            )
+                        )
+                    }
+                    lastFacebookCollectRun.value = lastFacebookCollectRun.value?.copy(results = collected.toList())
+                }
+                stopNote = outcome.stopReason
+                if (outcome.stoppedEarly) {
+                    terminalStatus = "FAILED"
+                    terminalError = outcome.stopReason
+                }
+            } catch (e: CancellationException) {
+                // Stop Task: whatever was collected is still written below.
+                terminalStatus = "FAILED"
+                stopNote = "Run cancelled before finishing."
+            } catch (e: Exception) {
+                terminalStatus = "FAILED"
+                terminalError = ProviderErrors.userMessage(e)
+            }
+
+            // Result file — always written once the task exists (partial
+            // results included), and registered in Created by Spark.
+            val summary = FacebookPostLinks.statusSummaryLine(collected)
+            var writtenPath: String? = null
+            try {
+                if (taskDao.getTaskById(taskId) != null) {
+                    workspaceManager.createDirectory("AI-Tasks")
+                    val md = FacebookPostLinks.formatResultsMarkdown(collected, safeCount, Date(now), stopNote)
+                    if (workspaceManager.writeFile(resultRelPath, md)) {
+                        writtenPath = resultRelPath
+                        try {
+                            val meta = workspaceManager.getFileMetadata(resultRelPath)
+                            agentCreatedFileDao.insertCreatedFile(
+                                AgentCreatedFileEntity(
+                                    relativePath = resultRelPath,
+                                    name = meta.name,
+                                    taskId = taskId,
+                                    mimeType = meta.mimeType,
+                                    sizeBytes = meta.sizeBytes,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                        } catch (ignored: Exception) {
+                        }
+                    }
+                }
+            } catch (ignored: Exception) {
+            }
+
+            val current = taskDao.getTaskById(taskId)
+            if (current != null && current.status != "CANCELLED") {
+                taskDao.updateTask(
+                    current.copy(
+                        status = terminalStatus,
+                        progress = if (terminalStatus == "COMPLETED") 100 else current.progress,
+                        currentOperation = if (terminalStatus == "COMPLETED") {
+                            "Done — $summary"
+                        } else {
+                            terminalError ?: stopNote ?: "Stopped"
+                        },
+                        errorMessage = if (terminalStatus == "FAILED") (terminalError ?: stopNote) else null,
+                        result = summary,
+                        createdFilesJson = writtenPath?.let { org.json.JSONArray(listOf(it)).toString() },
+                        updatedAt = System.currentTimeMillis(),
+                        completedAt = System.currentTimeMillis()
+                    )
+                )
+            }
+            // The run is over: release the browser back to standby (never
+            // yank it out of the user's hands if they hold it).
+            when (browserController.controlMode.value) {
+                BrowserControlMode.AGENT_ACTIVE,
+                BrowserControlMode.WAITING_APPROVAL,
+                BrowserControlMode.PAUSED ->
+                    browserController.updateControlMode(BrowserControlMode.STANDBY)
+                else -> Unit
+            }
+            lastFacebookCollectRun.value = FacebookCollectRunResult(
+                taskId = taskId,
+                requestedCount = safeCount,
+                totalProfiles = profiles.size,
+                results = collected.toList(),
+                resultFilePath = writtenPath,
+                running = false,
+                summaryLine = summary + (stopNote?.let { " Stopped early: $it" } ?: "")
+            )
+        }
+        agentLoop.registerJob(taskId, job)
+        return taskId
     }
 
     fun cancelTask(taskId: String) {

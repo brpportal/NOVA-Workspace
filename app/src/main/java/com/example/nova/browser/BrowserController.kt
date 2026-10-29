@@ -6,9 +6,12 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.net.http.SslError
 import android.view.ViewGroup
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -20,6 +23,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -76,6 +80,25 @@ class BrowserController(private val appContext: Context? = null) {
      */
     @Volatile
     var onPageFinishedListener: ((title: String, url: String) -> Unit)? = null
+
+    /**
+     * The most recent MAIN-FRAME load error (WebViewClient.onReceivedError),
+     * cleared whenever a new navigation starts. Deterministic automations
+     * read this to tell an OPEN_FAILED page apart from a loaded one.
+     */
+    @Volatile
+    var lastLoadError: LoadErrorInfo? = null
+        private set
+
+    /**
+     * True after the WebView's renderer process died
+     * (onRenderProcessGone). The dead view is detached and destroyed in
+     * the callback; the next [obtainWebViewLocked] builds a fresh one.
+     * Cleared when a fresh view is created or via [recreateWebView].
+     */
+    @Volatile
+    var rendererCrashed: Boolean = false
+        private set
 
     /** Most recent [observePage] result — click/type targets resolve against it. */
     @Volatile
@@ -138,6 +161,8 @@ class BrowserController(private val appContext: Context? = null) {
     private fun obtainWebViewLocked(): WebView? {
         webViewRef?.get()?.let { return it }
         val ctx = appContext ?: return null
+        // A fresh view replaces any renderer-crashed predecessor.
+        rendererCrashed = false
         val wv = createConfiguredWebView(ctx)
         ownedWebView = wv
         webViewRef = WeakReference(wv)
@@ -160,6 +185,58 @@ class BrowserController(private val appContext: Context? = null) {
     /** Suspend entry point: guarantees a live WebView on the main thread. */
     suspend fun ensureWebView(): Boolean = withContext(Dispatchers.Main) {
         obtainWebViewLocked() != null
+    }
+
+    /**
+     * Destroys the current WebView (if any) and builds a fresh one — the
+     * recovery path after a renderer crash (onRenderProcessGone). Returns
+     * true when a live replacement exists afterwards. If the destroyed
+     * view was on display in the Browser screen, the screen re-attaches
+     * the replacement on its next recomposition.
+     */
+    suspend fun recreateWebView(): Boolean = withContext(Dispatchers.Main) {
+        try {
+            val old = ownedWebView ?: webViewRef?.get()
+            if (old != null) {
+                (old.parent as? ViewGroup)?.removeView(old)
+                old.destroy()
+            }
+        } catch (ignored: Exception) {}
+        ownedWebView = null
+        webViewRef = null
+        lastLoadError = null
+        rendererCrashed = false
+        obtainWebViewLocked() != null
+    }
+
+    /**
+     * All anchor hrefs of the current page (absolute, DOM order), for
+     * deterministic link collectors. Null when no page could be read.
+     */
+    suspend fun extractAnchorHrefs(): List<String>? {
+        val raw = evaluateJs(ANCHORS_JS) ?: return null
+        return try {
+            val arr = JSONArray(unescapeJsString(raw))
+            val out = ArrayList<String>(arr.length())
+            for (i in 0 until arr.length()) {
+                val h = arr.optString(i)
+                if (h.isNotBlank()) out.add(h)
+            }
+            out
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * The page-probe JSON ({url, title, hasPassword, hasLoginForm, text})
+     * consumed by FacebookPostLinks.signalsFromProbeJson. Null when no
+     * page could be read at all.
+     */
+    suspend fun extractPageProbeJson(): String? {
+        val raw = evaluateJs(PAGE_PROBE_JS) ?: return null
+        val clean = unescapeJsString(raw)
+        return if (clean.isBlank() || clean == "null") null else clean
     }
 
     /** The WebView for agent actions: ensures existence, null only if impossible. */
@@ -233,6 +310,8 @@ class BrowserController(private val appContext: Context? = null) {
         wv.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
+                // A new navigation supersedes any previous load error.
+                lastLoadError = null
                 updateTabState {
                     it.copy(
                         isLoading = true,
@@ -271,6 +350,38 @@ class BrowserController(private val appContext: Context? = null) {
                         sslErrorDesc = "The webpage certificate could not be verified (${error?.primaryError}). Connection cancelled for your protection."
                     )
                 }
+            }
+
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                super.onReceivedError(view, request, error)
+                // Main-frame failures only: subresource errors (a broken
+                // image, a blocked tracker) must not condemn the page.
+                if (request?.isForMainFrame == true) {
+                    lastLoadError = LoadErrorInfo(
+                        errorCode = error?.errorCode ?: -1,
+                        description = error?.description?.toString() ?: "Unknown load error",
+                        failingUrl = request.url?.toString() ?: "",
+                        atMs = System.currentTimeMillis()
+                    )
+                }
+            }
+
+            override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                // The renderer process died: this WebView instance is
+                // unusable. Detach + destroy it so the next obtain builds
+                // a fresh one, and flag the crash for the caller (the
+                // trained collector maps this to FB_ERROR recovery).
+                rendererCrashed = true
+                try {
+                    if (view != null) {
+                        (view.parent as? ViewGroup)?.removeView(view)
+                        if (ownedWebView === view) ownedWebView = null
+                        if (webViewRef?.get() === view) webViewRef = null
+                        view.destroy()
+                    }
+                } catch (ignored: Exception) {}
+                updateTabState { it.copy(isLoading = false) }
+                return true
             }
         }
         wv.webChromeClient = object : WebChromeClient() {
@@ -1305,6 +1416,55 @@ class BrowserController(private val appContext: Context? = null) {
             data = clean
         )
     }
+
+    /** Anchor harvest for deterministic collectors: every a[href], absolute, DOM order (capped). */
+    private val ANCHORS_JS = """
+        (function() {
+            try {
+                var nodes = document.querySelectorAll('a[href]');
+                var out = [];
+                for (var i = 0; i < nodes.length && out.length < 3000; i++) {
+                    out.push(nodes[i].href);
+                }
+                return JSON.stringify(out);
+            } catch (e) {
+                return JSON.stringify([]);
+            }
+        })();
+    """.trimIndent()
+
+    /**
+     * Page probe for trained classifiers: identity (url/title), login-wall
+     * signals (password field / login form) and a visible-text excerpt for
+     * phrase matching. Values are read live; nothing is stored.
+     */
+    private val PAGE_PROBE_JS = """
+        (function() {
+            try {
+                var hasPassword = !!document.querySelector('input[type="password"]');
+                var hasLoginForm = hasPassword;
+                if (!hasLoginForm) {
+                    var forms = document.querySelectorAll('form');
+                    for (var i = 0; i < forms.length; i++) {
+                        var action = (forms[i].getAttribute('action') || '').toLowerCase();
+                        var id = (forms[i].id || '').toLowerCase();
+                        if (action.indexOf('login') >= 0 || id.indexOf('login') >= 0) { hasLoginForm = true; break; }
+                    }
+                }
+                var text = '';
+                try { text = document.body ? document.body.innerText.substring(0, 4000) : ''; } catch (e) {}
+                return JSON.stringify({
+                    url: window.location.href,
+                    title: document.title || '',
+                    hasPassword: hasPassword,
+                    hasLoginForm: hasLoginForm,
+                    text: text
+                });
+            } catch (e) {
+                return JSON.stringify({url: '', title: '', hasPassword: false, hasLoginForm: false, text: ''});
+            }
+        })();
+    """.trimIndent()
 
     /**
      * Cheap page-identity probe for the observation cache: current URL and

@@ -32,7 +32,7 @@ object TaskNotificationHelper {
     const val PERMISSION_REQUEST_CODE = 1001
 
     /** Task statuses that warrant a user-facing notification. */
-    val NOTIFY_STATUSES = setOf("COMPLETED", "FAILED", "WAITING_APPROVAL", "SAFETY_STOPPED")
+    val NOTIFY_STATUSES = setOf("COMPLETED", "FAILED", "WAITING_APPROVAL", "WAITING", "SAFETY_STOPPED")
 
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -71,6 +71,7 @@ object TaskNotificationHelper {
         "COMPLETED" -> "Task completed"
         "FAILED" -> "Task failed"
         "WAITING_APPROVAL" -> "Needs your approval"
+        "WAITING" -> "Needs you"
         "SAFETY_STOPPED" -> "Stopped — safety could not be confirmed"
         else -> status
     }

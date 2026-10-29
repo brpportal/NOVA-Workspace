@@ -60,6 +60,8 @@ object ApprovalPolicy {
         "observe_page", "get_current_url", "get_page_title", "get_page_state",
         "wait_for_load", "take_screenshot", "get_visible_text", "find_element",
         "get_set_of_marks", "clear_set_of_marks",
+        // Trained Task #1: read-only link collection (never submits/posts)
+        "collect_facebook_post_links",
         // Workspace / memory reads
         "file_list", "file_read", "file_search", "file_get_metadata",
         "memory_retrieve"

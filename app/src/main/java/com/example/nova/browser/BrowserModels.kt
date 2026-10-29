@@ -7,6 +7,19 @@ data class BrowserActionResult(
     val error: String? = null
 )
 
+/**
+ * A main-frame load error recorded by the WebViewClient (trained-task
+ * support): deterministic automations like the Facebook links collector
+ * must distinguish "the page failed to open" (OPEN_FAILED) from a page
+ * that loaded fine — JS reads alone cannot see network-level failures.
+ */
+data class LoadErrorInfo(
+    val errorCode: Int,
+    val description: String,
+    val failingUrl: String,
+    val atMs: Long
+)
+
 data class BrowserTabState(
     val id: String,
     val title: String = "New Tab",
