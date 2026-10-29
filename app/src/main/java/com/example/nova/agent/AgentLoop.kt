@@ -2,6 +2,7 @@ package com.example.nova.agent
 
 import com.example.nova.ai.AIMessage
 import com.example.nova.ai.AIProviderAdapter
+import com.example.nova.ai.AIResponse
 import com.example.nova.ai.AIToolCall
 import com.example.nova.ai.AIToolDefinition
 import com.example.nova.ai.ProviderEmptyResponseException
