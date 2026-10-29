@@ -257,27 +257,6 @@ class FacebookLinksCollector(
             }
 
             when (attempt.pageClass) {
-                FacebookPageClass.LOGIN_WALL -> {
-                    when (handleLoginWall(normalized, hooks, loginPauseUsed)) {
-                        LoginFlow.RESUMED -> {
-                            loginPauseUsed = true
-                            continue
-                        }
-                        LoginFlow.GIVE_UP -> return result(
-                            FacebookProfileStatus.LOGIN_REQUIRED,
-                            note = "A Facebook login is required to see this profile (Needs you)."
-                        )
-                        LoginFlow.ABORT_RUN -> throw AbortRunException(
-                            result(
-                                FacebookProfileStatus.LOGIN_REQUIRED,
-                                note = "Login was not completed — the run stopped here."
-                            ),
-                            "Login was not completed in time — run stopped.",
-                            stoppedForLogin = true
-                        )
-                    }
-                }
-
                 FacebookPageClass.FB_ERROR_PAGE -> {
                     if (fbRecoveries < 1) {
                         fbRecoveries++
@@ -298,7 +277,8 @@ class FacebookLinksCollector(
                 FacebookPageClass.PROFILE_UNAVAILABLE ->
                     return result(FacebookProfileStatus.PROFILE_UNAVAILABLE, note = "Facebook says this content isn't available (banned, deactivated or not found).")
 
-                FacebookPageClass.CONTENT, null -> {
+                FacebookPageClass.CONTENT, FacebookPageClass.LOGIN_WALL, null -> {
+                    val initialWall = (attempt.pageClass == FacebookPageClass.LOGIN_WALL)
                     val outcome = collectLinks(normalized, count, hooks, carriedLinks)
                     carriedLinks.addAll(outcome.links)
                     when {
@@ -326,7 +306,7 @@ class FacebookLinksCollector(
                                 "The browser's renderer crashed while collecting."
                             )
                         }
-                        outcome.loginDetected -> {
+                        outcome.loginDetected && outcome.links.isEmpty() -> {
                             when (handleLoginWall(normalized, hooks, loginPauseUsed)) {
                                 LoginFlow.RESUMED -> {
                                     loginPauseUsed = true
@@ -366,6 +346,7 @@ class FacebookLinksCollector(
                             candidates += FacebookPostLinks.MethodYield("M1 mobile", outcome.links)
                             summaryParts += "M1 mobile: ${outcome.links.size} ${linkWord(outcome.links.size)}"
                             var postsAreaEvidence = outcome.postsAreaRendered
+                            var wallSeen = initialWall || outcome.loginDetected
 
                             fun budgetLeft(): Long =
                                 PER_PROFILE_BUDGET_MS - (System.currentTimeMillis() - profileStartMs)
@@ -402,7 +383,8 @@ class FacebookLinksCollector(
                                         browserController.waitForLoad(LOAD_TIMEOUT_MS)
                                         val h = harvestCurrentPage(count, MAX_FALLBACK_SCROLLS, SETTLE_MS)
                                         if (h.loginWall) {
-                                            hooks.onStep("M2 posts section: hit a login wall — skipped (login pauses come only from M1)")
+                                            wallSeen = true
+                                            hooks.onStep("M2 posts section: hit a login wall — skipped (login pauses come only after the full ladder)")
                                         } else {
                                             candidates += FacebookPostLinks.MethodYield("M2 posts section", h.links)
                                             summaryParts += "M2 posts section: ${h.links.size} ${linkWord(h.links.size)}"
@@ -459,6 +441,8 @@ class FacebookLinksCollector(
                                                 )
                                                 m4Links = (h.links + mined).distinct()
                                                 if (h.postsAreaRendered) postsAreaEvidence = true
+                                            } else {
+                                                wallSeen = true
                                             }
                                         }
                                     }
@@ -500,22 +484,26 @@ class FacebookLinksCollector(
                                             FacebookPostLinks.classifyPage(probe5) ==
                                             FacebookPageClass.LOGIN_WALL)
                                     if (walled5) {
-                                        hooks.onStep("M5 mbasic: hit a login wall — skipped (login pauses come only from M1)")
+                                        wallSeen = true
+                                        hooks.onStep("M5 mbasic: hit a login wall — skipped (login pauses come only after the full ladder)")
                                     } else {
                                         if (probe5?.hasPostsArea == true) postsAreaEvidence = true
                                         val links5 = LinkedHashSet<String>()
                                         var follows = 0
                                         while (true) {
                                             currentCoroutineContext().ensureActive()
+                                            val currentM5Url = browserController.getCurrentUrl().data.orEmpty()
                                             val hrefs = browserController.extractAnchorHrefs()
                                             if (hrefs != null) {
-                                                links5.addAll(FacebookPostLinks.extractPostLinks(hrefs))
+                                                links5.addAll(FacebookPostLinks.extractPostLinks(hrefs, currentM5Url))
                                             }
+                                            val pageSource = browserController.extractPageSource()
+                                            links5.addAll(FacebookPostLinks.mineLinksFromPageSource(pageSource, currentM5Url))
                                             if (links5.size >= count || follows >= 2) break
                                             val withText =
-                                                browserController.extractAnchorsWithText() ?: break
+                                                 browserController.extractAnchorsWithText() ?: break
                                             val more =
-                                                FacebookPostLinks.findSeeMoreHref(withText) ?: break
+                                                 FacebookPostLinks.findSeeMoreHref(withText) ?: break
                                             if (!browserController.navigate(more).success) break
                                             follows++
                                             browserController.waitForLoad(LOAD_TIMEOUT_MS)
@@ -533,6 +521,30 @@ class FacebookLinksCollector(
                             // ---- Final resolution: the best candidate wins ----
                             val best = FacebookPostLinks.selectBestYield(candidates)!!
                             val finalLinks = best.links.take(count)
+
+                            if (finalLinks.isEmpty() && wallSeen) {
+                                when (handleLoginWall(normalized, hooks, loginPauseUsed)) {
+                                    LoginFlow.RESUMED -> {
+                                        loginPauseUsed = true
+                                        continue
+                                    }
+                                    LoginFlow.GIVE_UP -> return result(
+                                        FacebookProfileStatus.LOGIN_REQUIRED,
+                                        finalLinks,
+                                        note = "A Facebook login is required to see this profile (Needs you)."
+                                    )
+                                    LoginFlow.ABORT_RUN -> throw AbortRunException(
+                                        result(
+                                            FacebookProfileStatus.LOGIN_REQUIRED,
+                                            finalLinks,
+                                            note = "Login was not completed — the run stopped here."
+                                        ),
+                                        "Login was not completed in time — run stopped.",
+                                        stoppedForLogin = true
+                                    )
+                                }
+                            }
+
                             val methodsSummary = summaryParts.joinToString("; ") +
                                 " — final set from ${best.method}"
                             hooks.onStep("Methods for $normalized — $methodsSummary")
@@ -544,7 +556,7 @@ class FacebookLinksCollector(
                                 FacebookProfileStatus.PARTIAL ->
                                     "Only ${finalLinks.size} of $count posts were found on this profile (best method: ${best.method})."
                                 FacebookProfileStatus.NO_POSTS ->
-                                    "Every method was tried — the posts area rendered, but no post permalinks were found."
+                                    "Every method was tried, but no post permalinks were found on this profile."
                                 FacebookProfileStatus.LOGIN_REQUIRED ->
                                     "Every method was tried — Facebook showed no posts for this profile; it may be asking for a login (Needs you)."
                                 else -> null
@@ -683,16 +695,18 @@ class FacebookLinksCollector(
             val hrefs = browserController.extractAnchorHrefs()
             if (hrefs != null) {
                 scannedHrefs.addAll(hrefs)
-                found.addAll(FacebookPostLinks.extractPostLinks(hrefs))
+                found.addAll(FacebookPostLinks.extractPostLinks(hrefs, currentUrl))
             }
             if (found.isEmpty()) {
                 // Fallback scan: anchors inside feed/article containers.
                 val containerHrefs = browserController.extractContainerAnchorHrefs()
                 if (containerHrefs != null) {
                     scannedHrefs.addAll(containerHrefs)
-                    found.addAll(FacebookPostLinks.extractPostLinks(containerHrefs))
+                    found.addAll(FacebookPostLinks.extractPostLinks(containerHrefs, currentUrl))
                 }
             }
+            val pageSource = browserController.extractPageSource()
+            found.addAll(FacebookPostLinks.mineLinksFromPageSource(pageSource, currentUrl))
 
             // Probe: posts-area evidence, late-rendered login gates, and
             // the data for this attempt's diagnostic step.
@@ -763,7 +777,7 @@ class FacebookLinksCollector(
             val before = found.size
             val hrefs = browserController.extractAnchorHrefs()
             if (hrefs != null) {
-                found.addAll(FacebookPostLinks.extractPostLinks(hrefs))
+                found.addAll(FacebookPostLinks.extractPostLinks(hrefs, currentUrl))
             }
             val added = found.size - before
             if (found.size >= count) break
@@ -860,9 +874,18 @@ class FacebookLinksCollector(
                 return HarvestOutcome(found.toList(), postsArea, rendererDied = true)
             }
             val url = browserController.getCurrentUrl().data.orEmpty()
-            if (FacebookPostLinks.isLoginUrl(url)) {
-                return HarvestOutcome(found.toList(), postsArea, loginWall = true)
+            val before = found.size
+            val hrefs = browserController.extractAnchorHrefs()
+            if (hrefs != null) found.addAll(FacebookPostLinks.extractPostLinks(hrefs, url))
+            if (found.isEmpty()) {
+                val containerHrefs = browserController.extractContainerAnchorHrefs()
+                if (containerHrefs != null) {
+                    found.addAll(FacebookPostLinks.extractPostLinks(containerHrefs, url))
+                }
             }
+            val pageSource = browserController.extractPageSource()
+            found.addAll(FacebookPostLinks.mineLinksFromPageSource(pageSource, url))
+
             val probeJson = browserController.extractPageProbeJson()
             val signals = probeJson?.let {
                 FacebookPostLinks.signalsFromProbeJson(
@@ -875,14 +898,8 @@ class FacebookLinksCollector(
                     return HarvestOutcome(found.toList(), postsArea, loginWall = true)
                 }
             }
-            val before = found.size
-            val hrefs = browserController.extractAnchorHrefs()
-            if (hrefs != null) found.addAll(FacebookPostLinks.extractPostLinks(hrefs))
-            if (found.isEmpty()) {
-                val containerHrefs = browserController.extractContainerAnchorHrefs()
-                if (containerHrefs != null) {
-                    found.addAll(FacebookPostLinks.extractPostLinks(containerHrefs))
-                }
+            if (FacebookPostLinks.isLoginUrl(url)) {
+                return HarvestOutcome(found.toList(), postsArea, loginWall = true)
             }
             if (found.size >= count) break
             if (found.size == before) {

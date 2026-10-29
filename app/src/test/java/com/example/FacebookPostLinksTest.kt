@@ -373,8 +373,8 @@ class FacebookPostLinksTest {
 
     @Test
     fun `fixture LOGIN_REQUIRED - logged-out nag gate without any password field`() {
-        // The dawateislami.net failure shape: profile URL loads, no login
-        // FORM (no password field), but the page wears the login nag.
+        // Under new rules, nag gate alone without visible password form or
+        // login interstitial does NOT classify as LOGIN_WALL; it is CONTENT / NO_POSTS.
         val nag = FacebookPageSignals(
             finalUrl = "https://m.facebook.com/dawateislami.net",
             title = "DawateIslami",
@@ -382,9 +382,9 @@ class FacebookPostLinksTest {
             hasLoginGate = true,
             pageText = "DawateIslami · 9.8M followers. See more on Facebook. Log in to see more posts."
         )
-        assertEquals(FacebookPageClass.LOGIN_WALL, FacebookPostLinks.classifyPage(nag))
+        assertEquals(FacebookPageClass.CONTENT, FacebookPostLinks.classifyPage(nag))
         assertEquals(
-            FacebookProfileStatus.LOGIN_REQUIRED,
+            FacebookProfileStatus.NO_POSTS,
             FacebookPostLinks.resolveStatus(nag, linkCount = 0, requestedCount = 5)
         )
     }
@@ -398,26 +398,83 @@ class FacebookPostLinksTest {
             )
             assertEquals(
                 "phrase: $phrase",
-                FacebookPageClass.LOGIN_WALL,
+                FacebookPageClass.CONTENT,
                 FacebookPostLinks.classifyPage(signals)
+            )
+            assertEquals(
+                "phrase: $phrase",
+                FacebookProfileStatus.NO_POSTS,
+                FacebookPostLinks.resolveStatus(signals, linkCount = 0, requestedCount = 5)
             )
         }
     }
 
     @Test
-    fun `zero links without posts-area evidence is never NO_POSTS`() {
-        val unseen = contentSignals.copy(hasPostsArea = false)
+    fun `logged-in signals incl Following button and stray Log in text resolves to NO_POSTS`() {
+        val signals = FacebookPageSignals(
+            finalUrl = "https://m.facebook.com/dawateislami.net",
+            title = "DawateIslami",
+            hasFollowAction = true,
+            hasLoginForm = false,
+            pageText = "DawateIslami · 9.8M followers · Following · Message. Log in to comment."
+        )
+        assertEquals(FacebookPageClass.CONTENT, FacebookPostLinks.classifyPage(signals))
+        assertEquals(
+            FacebookProfileStatus.NO_POSTS,
+            FacebookPostLinks.resolveStatus(signals, linkCount = 0, requestedCount = 5)
+        )
+    }
+
+    @Test
+    fun `visible password-field login form resolves to LOGIN_REQUIRED`() {
+        val formSignals = FacebookPageSignals(
+            finalUrl = "https://m.facebook.com/some.page",
+            title = "Log in to Facebook",
+            hasLoginForm = true,
+            pageText = "Password. Log in"
+        )
+        assertEquals(FacebookPageClass.LOGIN_WALL, FacebookPostLinks.classifyPage(formSignals))
         assertEquals(
             FacebookProfileStatus.LOGIN_REQUIRED,
+            FacebookPostLinks.resolveStatus(formSignals, linkCount = 0, requestedCount = 5)
+        )
+    }
+
+    @Test
+    fun `final URL on login resolves to LOGIN_REQUIRED`() {
+        val urlSignals = FacebookPageSignals(
+            finalUrl = "https://m.facebook.com/login.php?next=some.page",
+            title = "Log in",
+            hasLoginForm = false,
+            pageText = "Please log in to continue"
+        )
+        assertEquals(FacebookPageClass.LOGIN_WALL, FacebookPostLinks.classifyPage(urlSignals))
+        assertEquals(
+            FacebookProfileStatus.LOGIN_REQUIRED,
+            FacebookPostLinks.resolveStatus(urlSignals, linkCount = 0, requestedCount = 5)
+        )
+    }
+
+    @Test
+    fun `probe JSON with tabs row All Photos Reels sets hasPostsArea to true`() {
+        val probe = """{"url":"https://m.facebook.com/page","title":"Page","hasPassword":false,"hasLoginForm":false,"hasPostsArea":false,"text":"All Photos Reels"}"""
+        val signals = FacebookPostLinks.signalsFromProbeJson(probe)
+        assertTrue(signals != null)
+        assertTrue(signals!!.hasPostsArea)
+    }
+
+    @Test
+    fun `zero links on content page resolves to NO_POSTS without positive login evidence`() {
+        val unseen = contentSignals.copy(hasPostsArea = false)
+        assertEquals(
+            FacebookProfileStatus.NO_POSTS,
             FacebookPostLinks.resolveStatus(unseen, linkCount = 0, requestedCount = 5)
         )
-        // And when the harvest positively rendered the posts area, the
-        // same zero resolves NO_POSTS.
         assertEquals(
             FacebookProfileStatus.NO_POSTS,
             FacebookPostLinks.finalStatus(
                 FacebookPageClass.CONTENT, linkCount = 0, requestedCount = 5,
-                postsAreaRendered = true
+                postsAreaRendered = false
             )
         )
     }

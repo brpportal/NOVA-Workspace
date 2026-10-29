@@ -1579,27 +1579,27 @@ class BrowserController(private val appContext: Context? = null) {
     private val PAGE_PROBE_JS = """
         (function() {
             try {
-                var hasPassword = !!document.querySelector('input[type="password"]');
-                var hasLoginForm = hasPassword;
-                if (!hasLoginForm) {
-                    var forms = document.querySelectorAll('form');
-                    for (var i = 0; i < forms.length; i++) {
-                        var action = (forms[i].getAttribute('action') || '').toLowerCase();
-                        var id = (forms[i].id || '').toLowerCase();
-                        if (action.indexOf('login') >= 0 || id.indexOf('login') >= 0) { hasLoginForm = true; break; }
-                    }
-                }
-                // Logged-out GATE (no form): a visible anchor/CTA to a
-                // login endpoint, a "Log In" labelled control, or the
-                // "see more on facebook" nag anywhere in the page text.
-                // Structural hrefs are language-independent; the text
-                // scan covers the whole body, not just the excerpt.
                 function visible(el) {
                     if (!el) return false;
                     var r = el.getBoundingClientRect();
                     if (r.width <= 0 || r.height <= 0) return false;
                     var s = window.getComputedStyle(el);
-                    return s.display !== 'none' && s.visibility !== 'hidden';
+                    return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+                }
+                var hasPassword = false;
+                var pwds = document.querySelectorAll('input[type="password"]');
+                for (var p = 0; p < pwds.length; p++) {
+                    if (visible(pwds[p])) { hasPassword = true; break; }
+                }
+                var hasLoginForm = hasPassword;
+                if (!hasLoginForm) {
+                    var forms = document.querySelectorAll('form');
+                    for (var i = 0; i < forms.length; i++) {
+                        if (!visible(forms[i])) continue;
+                        var action = (forms[i].getAttribute('action') || '').toLowerCase();
+                        var id = (forms[i].id || '').toLowerCase();
+                        if (action.indexOf('login') >= 0 || id.indexOf('login') >= 0) { hasLoginForm = true; break; }
+                    }
                 }
                 var hasLoginGate = false;
                 var loginAnchors = document.querySelectorAll('a[href*="login.php"], a[href*="/login/"], a[href*="/login?"]');
@@ -1616,8 +1616,75 @@ class BrowserController(private val appContext: Context? = null) {
                 var fullText = '';
                 try { fullText = (document.body ? document.body.innerText : '').toLowerCase(); } catch (e) {}
                 if (!hasLoginGate && fullText.indexOf('see more on facebook') >= 0) { hasLoginGate = true; }
+
+                // hasLoginInterstitial: an element covering about 85-90% of the viewport whose text carries login phrasing, or a full-screen login dialog
+                var hasLoginInterstitial = false;
+                var vw = window.innerWidth || document.documentElement.clientWidth || 360;
+                var vh = window.innerHeight || document.documentElement.clientHeight || 640;
+                var vArea = vw * vh;
+                var dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"], .modal, div[id*="dialog"], div[class*="dialog"], div[class*="modal"]');
+                for (var d = 0; d < dialogs.length; d++) {
+                    var dlg = dialogs[d];
+                    if (visible(dlg)) {
+                        var dr = dlg.getBoundingClientRect();
+                        var dt = (dlg.innerText || dlg.textContent || '').toLowerCase();
+                        if ((dt.indexOf('log in') >= 0 || dt.indexOf('login') >= 0 || dt.indexOf('see more on facebook') >= 0) &&
+                            (dr.width >= 0.80 * vw || dr.height >= 0.80 * vh || (dr.width * dr.height) >= 0.70 * vArea)) {
+                            hasLoginInterstitial = true;
+                            break;
+                        }
+                    }
+                }
+                if (!hasLoginInterstitial) {
+                    var divs = document.querySelectorAll('div, section');
+                    for (var di = 0; di < divs.length && di < 250; di++) {
+                        var dv = divs[di];
+                        if (visible(dv)) {
+                            var vr = dv.getBoundingClientRect();
+                            var area = vr.width * vr.height;
+                            if (area >= 0.85 * vArea && vr.top <= 0.15 * vh) {
+                                var dvt = (dv.innerText || dv.textContent || '').toLowerCase();
+                                if (dvt.indexOf('log in to continue') >= 0 || dvt.indexOf('you must log in') >= 0 ||
+                                    (dvt.indexOf('see more on facebook') >= 0 && dvt.indexOf('log in') >= 0)) {
+                                    hasLoginInterstitial = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // hasLoggedInChrome: account/composer/notifications anchors
+                var hasLoggedInChrome = false;
+                var chromeAnchors = document.querySelectorAll(
+                    'a[href*="/notifications"], a[href*="/messages"], a[href*="/composer"], a[href*="/me/"], ' +
+                    '[data-sigil*="m-composer"], [data-sigil*="notifications"], [aria-label*="Notifications"], ' +
+                    '[aria-label*="Account"], [aria-label*="Your profile"], [aria-label*="Menu"]'
+                );
+                for (var c = 0; c < chromeAnchors.length; c++) {
+                    if (visible(chromeAnchors[c])) { hasLoggedInChrome = true; break; }
+                }
+                if (!hasLoggedInChrome) {
+                    var composer = document.querySelector('textarea[name="xhpc_message"], [data-testid="status-attachment-mentions-input"], [aria-label*="What\'s on your mind"]');
+                    if (composer && visible(composer)) hasLoggedInChrome = true;
+                }
+
+                // hasFollowAction: Follow/Following/Message action row
+                var hasFollowAction = false;
+                var actionButtons = document.querySelectorAll('button, a, [role="button"]');
+                for (var b = 0; b < actionButtons.length && b < 300; b++) {
+                    var btn = actionButtons[b];
+                    if (visible(btn)) {
+                        var bLabel = (btn.innerText || btn.textContent || btn.getAttribute('aria-label') || '').trim().toLowerCase();
+                        if (bLabel === 'follow' || bLabel === 'following' || bLabel === 'message' || bLabel.indexOf('follow') === 0 || bLabel.indexOf('message') === 0) {
+                            hasFollowAction = true;
+                            break;
+                        }
+                    }
+                }
+
                 // Positive evidence the posts area rendered: feed /
-                // article containers, or a Posts section header.
+                // article containers, or a Posts section header, or profile tabs row, or header stats.
                 var hasPostsArea = !!document.querySelector('article, [role="article"], [role="feed"]');
                 if (!hasPostsArea) {
                     var heads = document.querySelectorAll('h1, h2, h3, [role="heading"]');
@@ -1625,6 +1692,24 @@ class BrowserController(private val appContext: Context? = null) {
                         if ((heads[m].innerText || '').trim().toLowerCase() === 'posts') { hasPostsArea = true; break; }
                     }
                 }
+                if (!hasPostsArea) {
+                    var tabs = document.querySelectorAll('[role="tablist"], nav, [data-sigil*="tabs"], div');
+                    for (var t = 0; t < tabs.length && t < 100; t++) {
+                        var tText = (tabs[t].innerText || '').toLowerCase().replace(/\s+/g, ' ');
+                        if (tText.indexOf('all photos reels') >= 0 || tText.indexOf('all posts photos') >= 0 ||
+                            tText.indexOf('all photos posts') >= 0 || tText.indexOf('all posts reels') >= 0) {
+                            hasPostsArea = true;
+                            break;
+                        }
+                    }
+                }
+                if (!hasPostsArea) {
+                    var bodyText = (document.body ? document.body.innerText : '');
+                    if (/\b\d[\d,.]*[kmbt]?\s+(followers|following)\b/i.test(bodyText)) {
+                        hasPostsArea = true;
+                    }
+                }
+
                 var text = '';
                 try { text = document.body ? document.body.innerText.substring(0, 4000) : ''; } catch (e) {}
                 return JSON.stringify({
@@ -1633,11 +1718,25 @@ class BrowserController(private val appContext: Context? = null) {
                     hasPassword: hasPassword,
                     hasLoginForm: hasLoginForm,
                     hasLoginGate: hasLoginGate,
+                    hasLoginInterstitial: hasLoginInterstitial,
+                    hasLoggedInChrome: hasLoggedInChrome,
+                    hasFollowAction: hasFollowAction,
                     hasPostsArea: hasPostsArea,
                     text: text
                 });
             } catch (e) {
-                return JSON.stringify({url: '', title: '', hasPassword: false, hasLoginForm: false, hasLoginGate: false, hasPostsArea: false, text: ''});
+                return JSON.stringify({
+                    url: '',
+                    title: '',
+                    hasPassword: false,
+                    hasLoginForm: false,
+                    hasLoginGate: false,
+                    hasLoginInterstitial: false,
+                    hasLoggedInChrome: false,
+                    hasFollowAction: false,
+                    hasPostsArea: false,
+                    text: ''
+                });
             }
         })();
     """.trimIndent()
