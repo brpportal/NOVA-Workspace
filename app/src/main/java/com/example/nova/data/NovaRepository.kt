@@ -687,11 +687,9 @@ class NovaRepository(
         val task = AgentTaskEntity(
             id = taskId,
             title = "Facebook Post Links Collector",
-            description = "Trained task (no AI): collect the latest $safeCount post links from ${profiles.size} Facebook profile(s).",
-            prompt = "Trained task — Facebook Post Links Collector. ${profiles.size} profile(s), $safeCount post link(s) each. Runs deterministically without AI; pauses as Needs you only on a Facebook login wall.",
+            prompt = "Trained task (no AI) — Facebook Post Links Collector: collect the latest $safeCount post links from ${profiles.size} Facebook profile(s). Runs deterministically without AI; pauses as Needs you only on a Facebook login wall.",
             status = "PENDING",
-            priority = "NORMAL",
-            progress = 0,
+            progressPercent = 0,
             currentOperation = "Starting collector",
             createdAt = now,
             updatedAt = now
@@ -811,7 +809,7 @@ class NovaRepository(
                     if (t != null && t.status != "CANCELLED") {
                         taskDao.updateTask(
                             t.copy(
-                                progress = collected.size * 100 / profiles.size.coerceAtLeast(1),
+                                progressPercent = collected.size * 100 / profiles.size.coerceAtLeast(1),
                                 updatedAt = System.currentTimeMillis()
                             )
                         )
@@ -866,14 +864,13 @@ class NovaRepository(
                 taskDao.updateTask(
                     current.copy(
                         status = terminalStatus,
-                        progress = if (terminalStatus == "COMPLETED") 100 else current.progress,
+                        progressPercent = if (terminalStatus == "COMPLETED") 100 else current.progressPercent,
                         currentOperation = if (terminalStatus == "COMPLETED") {
                             "Done — $summary"
                         } else {
                             terminalError ?: stopNote ?: "Stopped"
                         },
                         errorMessage = if (terminalStatus == "FAILED") (terminalError ?: stopNote) else null,
-                        result = summary,
                         createdFilesJson = writtenPath?.let { org.json.JSONArray(listOf(it)).toString() },
                         updatedAt = System.currentTimeMillis(),
                         completedAt = System.currentTimeMillis()
