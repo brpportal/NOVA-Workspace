@@ -244,6 +244,40 @@ object ToolDefinitions {
             }
             """.trimIndent()
         ),
+        // Linux Mode Tools (real Ubuntu guest via PRoot — see linux-terminal skill)
+        AIToolDefinition(
+            name = "linux_status",
+            description = "Reports the real state of Spark's built-in Linux environment (Ubuntu via PRoot): whether it is installed and self-tested, the Ubuntu version, rootfs size, and which catalogued tools (git, python3, pip, nodejs, curl, wget, zip) are installed — from actual probes inside the guest. Never gated; call this before planning any Linux work.",
+            parametersSchemaJson = """{ "type": "object", "properties": {} }"""
+        ),
+        AIToolDefinition(
+            name = "linux_run",
+            description = "Runs a REAL bash command inside Spark's Ubuntu Linux guest (PRoot) and returns its actual stdout, stderr and exit code. The app workspace is mounted at /workspace inside the guest; files created there are visible in Spark's Files. Read-only inspection commands (ls, cat, uname, git --version, command -v X, …) run without asking; anything that installs, writes outside /workspace and /root, deletes or otherwise changes the system asks the user for approval first — never try to bypass that. Commands run non-interactively (stdin is closed): always pass flags like -y to apt. If the environment is not installed, this returns an error — tell the user to install it from the Terminal screen instead of retrying.",
+            parametersSchemaJson = """
+            {
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "The bash command line to execute in the guest, e.g. \"ls -la /workspace\" or \"python3 --version\"" },
+                    "timeout_seconds": { "type": "integer", "description": "Kill the command after this many seconds (default 120, max 900)" },
+                    "cwd": { "type": "string", "description": "Guest working directory (default /workspace)" }
+                },
+                "required": ["command"]
+            }
+            """.trimIndent()
+        ),
+        AIToolDefinition(
+            name = "linux_install_tool",
+            description = "Installs one supported tool inside the Ubuntu guest using the real apt flow (apt-get update + install), then verifies it with the tool's own version check. Supported tool ids: git, python3, pip, nodejs (Node.js + npm), curl, wget, zip (zip + unzip). Always asks the user for approval first. Use this instead of raw apt commands through linux_run when the user wants one of these tools.",
+            parametersSchemaJson = """
+            {
+                "type": "object",
+                "properties": {
+                    "tool": { "type": "string", "enum": ["git", "python3", "pip", "nodejs", "curl", "wget", "zip"], "description": "Catalog id of the tool to install" }
+                },
+                "required": ["tool"]
+            }
+            """.trimIndent()
+        ),
         AIToolDefinition(
             name = "task_record_artifact",
             description = "Saves an artifact (screenshot, extracted note, or file) to the active task folder in /AI-Tasks/.",

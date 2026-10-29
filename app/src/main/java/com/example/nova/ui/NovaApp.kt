@@ -19,6 +19,7 @@ import com.example.nova.ui.components.NovaScreen
 import com.example.nova.ui.screens.BrowserScreen
 import com.example.nova.ui.screens.ChatScreen
 import com.example.nova.ui.screens.FilesScreen
+import com.example.nova.ui.screens.LinuxScreen
 import com.example.nova.ui.screens.SettingsScreen
 import com.example.nova.ui.screens.TasksScreen
 
@@ -289,6 +290,9 @@ fun NovaApp(
                         NovaScreen.TASKS -> TasksScreen(
                             repository = repository,
                             onNavigateToApprovals = { showApprovalsScreen = true }
+                        )
+                        NovaScreen.LINUX -> LinuxScreen(
+                            repository = repository
                         )
                         NovaScreen.SETTINGS -> SettingsScreen(
                             repository = repository,

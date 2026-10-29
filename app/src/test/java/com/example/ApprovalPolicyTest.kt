@@ -165,4 +165,62 @@ class ApprovalPolicyTest {
             assertFalse("$tool must not require approval", ApprovalPolicy.requiresApproval(tool, args(), null))
         }
     }
+
+    @Test
+    fun `linux status and inspection commands stay ungated`() {
+        assertEquals(
+            ApprovalClass.READ_ONLY,
+            ApprovalPolicy.classify("linux_status", args(), null)
+        )
+        assertFalse(ApprovalPolicy.requiresApproval("linux_status", args(), null))
+
+        for (command in listOf(
+            "ls -la /workspace",
+            "pwd && uname -m",
+            "git --version",
+            "python3 -m pip --version",
+            "cd /workspace && find . -name '*.py'"
+        )) {
+            val commandArgs = args("""{"command":"$command"}""")
+            assertEquals(
+                "$command must classify READ_ONLY",
+                ApprovalClass.READ_ONLY,
+                ApprovalPolicy.classify("linux_run", commandArgs, null)
+            )
+            assertFalse(
+                "$command must not require approval",
+                ApprovalPolicy.requiresApproval("linux_run", commandArgs, null)
+            )
+        }
+    }
+
+    @Test
+    fun `linux changes and tool installs require approval`() {
+        for (command in listOf(
+            "rm -rf /workspace/tmp",
+            "apt-get install -y git",
+            "echo hello > /workspace/hello.txt",
+            "python3 /workspace/script.py",
+            "find /workspace -delete"
+        )) {
+            val commandArgs = args("""{"command":"$command"}""")
+            assertEquals(
+                "$command must classify SYSTEM_CHANGE",
+                ApprovalClass.SYSTEM_CHANGE,
+                ApprovalPolicy.classify("linux_run", commandArgs, null)
+            )
+            assertTrue(
+                "$command must require approval",
+                ApprovalPolicy.requiresApproval("linux_run", commandArgs, null)
+            )
+        }
+
+        assertEquals(
+            ApprovalClass.SYSTEM_CHANGE,
+            ApprovalPolicy.classify("linux_install_tool", args("""{"tool":"git"}"""), null)
+        )
+        assertTrue(
+            ApprovalPolicy.requiresApproval("linux_install_tool", args("""{"tool":"git"}"""), null)
+        )
+    }
 }

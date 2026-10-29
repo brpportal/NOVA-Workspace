@@ -39,6 +39,8 @@ import com.example.ui.theme.WarmBorder
 
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.outlined.Flag
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.outlined.Terminal
 
 enum class NovaScreen(
     val title: String,
@@ -51,6 +53,7 @@ enum class NovaScreen(
     BROWSER("Browser", Icons.Filled.Language, Icons.Outlined.Language, "nav_browser"),
     FILES("Files", Icons.Filled.Folder, Icons.Outlined.Folder, "nav_files"),
     TASKS("Tasks", Icons.Filled.TaskAlt, Icons.Outlined.TaskAlt, "nav_tasks"),
+    LINUX("Terminal", Icons.Filled.Terminal, Icons.Outlined.Terminal, "nav_linux"),
     SETTINGS("Settings", Icons.Filled.Settings, Icons.Outlined.Settings, "nav_settings")
 }
 

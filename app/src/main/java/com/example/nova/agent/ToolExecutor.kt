@@ -3,6 +3,9 @@ package com.example.nova.agent
 import com.example.nova.browser.BrowserController
 import com.example.nova.data.MemoryDao
 import com.example.nova.data.MemoryEntryEntity
+import com.example.nova.linux.LinuxConfig
+import com.example.nova.linux.LinuxManager
+import com.example.nova.linux.LinuxToolCatalog
 import com.example.nova.security.SecretRedactor
 import com.example.nova.security.VaultManager
 import com.example.nova.trained.FacebookExtractionMode
@@ -27,7 +30,8 @@ class ToolExecutor(
     private val browserController: BrowserController,
     private val workspaceManager: WorkspaceManager,
     private val memoryDao: MemoryDao,
-    private val vaultManager: VaultManager
+    private val vaultManager: VaultManager,
+    private val linuxManager: LinuxManager
 ) {
     suspend fun execute(
         toolName: String,
@@ -270,6 +274,99 @@ class ToolExecutor(
                         )
                     }
                 }
+                "linux_status" -> {
+                    // Linux Mode: real state of the PRoot/Ubuntu environment.
+                    ToolExecutionResult(true, linuxManager.statusReport())
+                }
+                "linux_run" -> {
+                    // Runs a REAL command in the Ubuntu guest. The approval
+                    // gate already ran (ApprovalPolicy classifies the
+                    // command text): read-only inspection passes directly,
+                    // everything else was approved by the user.
+                    val command = arguments.optString("command").trim()
+                    val timeoutSec = arguments.optLong("timeout_seconds", 120).coerceIn(5, 900)
+                    val cwd = com.example.nova.linux.LinuxCommands.sanitizeGuestCwd(
+                        arguments.optString("cwd").ifBlank { null },
+                        LinuxConfig.GUEST_WORKSPACE
+                    )
+                    when {
+                        command.isBlank() -> ToolExecutionResult(
+                            false, "command is required", error = "command is required"
+                        )
+                        !linuxManager.isReady() -> ToolExecutionResult(
+                            false,
+                            "Linux environment is not ready (state: " +
+                                "${linuxManager.installInfo.value.state}). The user must open " +
+                                "the Terminal screen and install the environment first. " +
+                                "Do not retry in a loop.",
+                            error = "Linux environment not installed"
+                        )
+                        else -> {
+                            val result = linuxManager.runGuest(
+                                command = command,
+                                timeoutMs = timeoutSec * 1000,
+                                cwd = cwd
+                            )
+                            val sb = StringBuilder()
+                            when {
+                                result.timedOut -> sb.append("Timed out after ${timeoutSec}s — the process was killed.\n")
+                                result.cancelled -> sb.append("Stopped by the user.\n")
+                                else -> sb.append("Exit code: ").append(result.exitCode).append('\n')
+                            }
+                            result.cwdAfter?.let { sb.append("Working directory now: ").append(it).append('\n') }
+                            if (result.stdout.isNotBlank()) {
+                                sb.append("--- stdout ---\n").append(truncateForTool(result.stdout))
+                            }
+                            if (result.stderr.isNotBlank()) {
+                                sb.append("--- stderr ---\n").append(truncateForTool(result.stderr))
+                            }
+                            ToolExecutionResult(
+                                result.exitCode == 0,
+                                SecretRedactor.redactText(sb.toString().trimEnd(), emptyList()),
+                                error = if (result.exitCode == 0) null
+                                else "Linux command failed (exit ${result.exitCode})"
+                            )
+                        }
+                    }
+                }
+                "linux_install_tool" -> {
+                    // Installs one catalogued tool inside the guest with the
+                    // real apt flow. Always approval-gated (see policy).
+                    val toolId = arguments.optString("tool").trim()
+                    val tool = LinuxToolCatalog.byId(toolId)
+                    when {
+                        tool == null -> ToolExecutionResult(
+                            false,
+                            "Unknown tool '$toolId'. Valid tools: " +
+                                LinuxToolCatalog.ids().joinToString(", "),
+                            error = "Unknown linux tool"
+                        )
+                        !linuxManager.isReady() -> ToolExecutionResult(
+                            false,
+                            "Linux environment is not ready (state: " +
+                                "${linuxManager.installInfo.value.state}). The user must open " +
+                                "the Terminal screen and install the environment first.",
+                            error = "Linux environment not installed"
+                        )
+                        else -> {
+                            val result = linuxManager.installTool(tool)
+                            val sb = StringBuilder()
+                            sb.append("Install of ").append(tool.displayName)
+                                .append(" (").append(tool.packages.joinToString(" ")).append(")")
+                                .append(" finished with exit code ").append(result.exitCode).append(".\n")
+                            val tail = (result.stdout + "\n" + result.stderr).trim()
+                            if (tail.isNotBlank()) {
+                                sb.append("--- output (tail) ---\n").append(truncateForTool(tail.takeLast(6000)))
+                            }
+                            ToolExecutionResult(
+                                result.exitCode == 0,
+                                SecretRedactor.redactText(sb.toString().trimEnd(), emptyList()),
+                                error = if (result.exitCode == 0) null
+                                else "Tool install failed (exit ${result.exitCode})"
+                            )
+                        }
+                    }
+                }
                 "task_record_artifact" -> {
                     val fileName = arguments.getString("file_name")
                     val content = arguments.getString("content")
@@ -414,4 +511,9 @@ class ToolExecutor(
             ToolExecutionResult(false, "Tool error: $safeMsg", error = safeMsg)
         }
     }
+
+    /** Caps tool-output text so a chatty command cannot flood the model context. */
+    private fun truncateForTool(text: String, maxChars: Int = 6000): String =
+        if (text.length <= maxChars) text
+        else text.take(maxChars) + "\n… [truncated ${text.length - maxChars} chars]"
 }

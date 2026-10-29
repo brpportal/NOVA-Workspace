@@ -14,6 +14,7 @@ import com.example.nova.ai.FakeAIProvider
 import com.example.nova.ai.ProviderErrors
 import com.example.nova.browser.BrowserControlMode
 import com.example.nova.browser.BrowserController
+import com.example.nova.linux.LinuxManager
 import com.example.nova.notifications.TaskNotificationHelper
 import com.example.nova.trained.FacebookCollectRunResult
 import com.example.nova.trained.FacebookExtractionMode
@@ -65,7 +66,11 @@ class NovaRepository(
 
     val vaultManager = VaultManager(secretDao)
     val toolRegistry = ToolRegistry()
-    val toolExecutor = ToolExecutor(browserController, workspaceManager, memoryDao, vaultManager)
+    // Linux Mode: one app-wide manager for the PRoot/Ubuntu environment
+    // (rootfs lives in filesDir/linux, outside the workspace; the
+    // workspace itself is bind-mounted into the guest at /workspace).
+    val linuxManager = LinuxManager(context, workspaceManager.rootDir)
+    val toolExecutor = ToolExecutor(browserController, workspaceManager, memoryDao, vaultManager, linuxManager)
     val contextBuilder = ContextBuilder(workspaceManager, memoryDao, browserController)
 
     val pipelinePresence = MutableStateFlow(PipelinePresence.READY)

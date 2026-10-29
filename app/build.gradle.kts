@@ -55,6 +55,15 @@ android {
       signingConfig = signingConfigs.getByName("debugConfig")
     }
   }
+  // Linux Mode: the PRoot runtime binaries ship as .so files in jniLibs and
+  // are EXECUTED from the native library directory, so they must be
+  // extracted to disk at install time (legacy packaging), never loaded
+  // directly from the APK.
+  packaging {
+    jniLibs {
+      useLegacyPackaging = true
+    }
+  }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
@@ -125,6 +134,9 @@ dependencies {
   implementation(libs.logging.interceptor)
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
+  // Linux Mode: streaming tar extraction of the Ubuntu rootfs (pax/GNU tar,
+  // symlinks, hardlinks) — see com.example.nova.linux.TarExtractor.
+  implementation(libs.commons.compress)
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
