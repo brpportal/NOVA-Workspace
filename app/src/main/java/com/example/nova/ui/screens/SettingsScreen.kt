@@ -82,6 +82,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.FilterChip
+import androidx.compose.ui.text.input.KeyboardType
 import com.example.nova.ai.ApiKeySanitizer
 import com.example.nova.ai.ConnectionResult
 import com.example.nova.ai.ModelInfo
@@ -92,6 +95,10 @@ import com.example.nova.data.AppSettingsEntity
 import com.example.nova.data.MemoryEntryEntity
 import com.example.nova.data.NovaRepository
 import com.example.nova.security.PermissionMode
+import com.example.nova.trained.CollectorDefaults
+import com.example.nova.trained.FacebookExtractionMode
+import com.example.nova.trained.FacebookPostLinks
+import com.example.nova.trained.ScreenshotsCollection
 import com.example.nova.ui.components.MarkdownText
 import com.example.nova.ui.components.NovaBadge
 import com.example.ui.theme.StoneLight
@@ -227,6 +234,68 @@ fun SettingsScreen(
     // Reset Confirm Dialog
     var showResetConfirmDialog by remember { mutableStateOf(false) }
 
+    // --- 4. COLLECTORS DEFAULTS STATE (Round B) ---
+    // Persisted via CollectorDefaults keys in the same settings store;
+    // both Trained Tasks cards initialize from these values.
+    var collectorMethod by remember { mutableStateOf(FacebookExtractionMode.HYBRID) }
+    var collectorLinksText by remember {
+        mutableStateOf(FacebookPostLinks.DEFAULT_POSTS_PER_PROFILE.toString())
+    }
+    var collectorShotsText by remember {
+        mutableStateOf(ScreenshotsCollection.DEFAULT_POSTS_PER_PROFILE.toString())
+    }
+
+    // Loaded ONCE (a settings emission must never clobber a field the
+    // user is mid-way through typing).
+    var collectorDefaultsLoaded by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (!collectorDefaultsLoaded) {
+            collectorDefaultsLoaded = true
+            val defaults = repository.loadCollectorDefaults()
+            collectorMethod = defaults.method
+            collectorLinksText = defaults.linksPerSource.toString()
+            collectorShotsText = defaults.screenshotPostsPerProfile.toString()
+        }
+    }
+
+    // Each control persists ONLY its own key (clamped), and only when
+    // the field parses — clearing a field to retype never writes a
+    // fallback over the stored value.
+    val persistCollectorMethod: (FacebookExtractionMode) -> Unit = { method ->
+        collectorMethod = method
+        scope.launch {
+            repository.settingsDao.setSetting(
+                AppSettingsEntity(CollectorDefaults.KEY_METHOD, method.toolArg())
+            )
+        }
+    }
+    val persistCollectorLinks: (String) -> Unit = { text ->
+        collectorLinksText = text
+        text.trim().toIntOrNull()?.let { parsed ->
+            scope.launch {
+                repository.settingsDao.setSetting(
+                    AppSettingsEntity(
+                        CollectorDefaults.KEY_LINKS_PER_SOURCE,
+                        FacebookPostLinks.clampPostsPerProfile(parsed).toString()
+                    )
+                )
+            }
+        }
+    }
+    val persistCollectorShots: (String) -> Unit = { text ->
+        collectorShotsText = text
+        text.trim().toIntOrNull()?.let { parsed ->
+            scope.launch {
+                repository.settingsDao.setSetting(
+                    AppSettingsEntity(
+                        CollectorDefaults.KEY_SCREENSHOT_POSTS,
+                        ScreenshotsCollection.clampPostsPerProfile(parsed).toString()
+                    )
+                )
+            }
+        }
+    }
+
     // Load initial settings
     LaunchedEffect(settingsList) {
         selectedProviderType = settingsList.find { it.key == "ai_provider_type" }?.value ?: "openai_compatible"
@@ -306,6 +375,11 @@ fun SettingsScreen(
                     selected = selectedTopTab == 3,
                     onClick = { selectedTopTab = 3 },
                     text = { Text("Privacy", fontWeight = if (selectedTopTab == 3) FontWeight.Bold else FontWeight.Medium, fontSize = 12.sp) }
+                )
+                Tab(
+                    selected = selectedTopTab == 4,
+                    onClick = { selectedTopTab = 4 },
+                    text = { Text("Collectors", fontWeight = if (selectedTopTab == 4) FontWeight.Bold else FontWeight.Medium, fontSize = 12.sp) }
                 )
             }
 
@@ -873,6 +947,103 @@ fun SettingsScreen(
                             }
                             if (secrets.isEmpty()) {
                                 Text("No secrets saved. Tap '+' to create credentials.", color = StoneMuted, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+
+                // ==================== TAB 4: COLLECTORS ====================
+                if (selectedTopTab == 4) {
+                    item {
+                        Card(
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text(
+                                    text = "🎯 Core Features — Defaults",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = StoneMuted, fontWeight = FontWeight.Bold)
+                                )
+                                Text(
+                                    "These defaults pre-fill the Links Collection and Screenshots Collection cards on the Tasks screen. Every run can still override them on the card itself.",
+                                    fontSize = 12.sp,
+                                    color = StoneMuted
+                                )
+
+                                Text(
+                                    text = "Default extraction method",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    FilterChip(
+                                        selected = collectorMethod == FacebookExtractionMode.HYBRID,
+                                        onClick = { persistCollectorMethod(FacebookExtractionMode.HYBRID) },
+                                        label = { Text("Hybrid") }
+                                    )
+                                    FilterChip(
+                                        selected = collectorMethod == FacebookExtractionMode.M1_ONLY,
+                                        onClick = { persistCollectorMethod(FacebookExtractionMode.M1_ONLY) },
+                                        label = { Text("M1 only") }
+                                    )
+                                    FilterChip(
+                                        selected = collectorMethod == FacebookExtractionMode.M3_ONLY,
+                                        onClick = { persistCollectorMethod(FacebookExtractionMode.M3_ONLY) },
+                                        label = { Text("M3 only") }
+                                    )
+                                }
+                                Text(
+                                    text = when (collectorMethod) {
+                                        FacebookExtractionMode.HYBRID -> "Hybrid (M1+M3 ladder) — visible links first, structured data mining as backup."
+                                        FacebookExtractionMode.M1_ONLY -> "M1 only (visible links) — rendered page links; no structured-data mining."
+                                        FacebookExtractionMode.M3_ONLY -> "M3 only (structured data) — page-source/JSON mining only."
+                                    },
+                                    fontSize = 12.sp,
+                                    color = StoneMuted
+                                )
+
+                                Text(
+                                    text = "Default post links per source — Links Collection (1–100)",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                )
+                                OutlinedTextField(
+                                    value = collectorLinksText,
+                                    onValueChange = persistCollectorLinks,
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                val linksParsed = collectorLinksText.trim().toIntOrNull()
+                                val linksClamped = linksParsed?.let { FacebookPostLinks.clampPostsPerProfile(it) }
+                                if (linksParsed != null && linksClamped != null && linksParsed != linksClamped) {
+                                    Text(
+                                        text = "Will be clamped to $linksClamped (allowed range is 1–100).",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
+
+                                Text(
+                                    text = "Default post screenshots per profile — Screenshots Collection (1–10)",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold)
+                                )
+                                OutlinedTextField(
+                                    value = collectorShotsText,
+                                    onValueChange = persistCollectorShots,
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                val shotsParsed = collectorShotsText.trim().toIntOrNull()
+                                val shotsClamped = shotsParsed?.let { ScreenshotsCollection.clampPostsPerProfile(it) }
+                                if (shotsParsed != null && shotsClamped != null && shotsParsed != shotsClamped) {
+                                    Text(
+                                        text = "Will be clamped to $shotsClamped (allowed range is 1–10).",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
                             }
                         }
                     }

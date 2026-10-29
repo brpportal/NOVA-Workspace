@@ -80,6 +80,8 @@ import com.example.nova.data.ApprovalRecordEntity
 import com.example.nova.data.NovaRepository
 import com.example.nova.data.TaskStepEntity
 import androidx.compose.ui.text.input.KeyboardType
+import com.example.nova.trained.ActivityMetrics
+import com.example.nova.trained.ActivityMetricsAggregator
 import com.example.nova.trained.FacebookExtractionMode
 import com.example.nova.trained.FacebookPostLinks
 import com.example.nova.trained.FacebookProfileStatus
@@ -210,6 +212,9 @@ fun TasksScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 if (selectedFilterIndex == 0) {
+                    item {
+                        ActivityMetricsStrip(repository = repository, tasks = tasks)
+                    }
                     item {
                         TrainedTasksSection(repository = repository)
                     }
@@ -735,6 +740,99 @@ fun AuditTimelineRow(event: AuditTimelineEvent) {
 }
 
 /**
+ * Round B — "Activity — all time" strip above the task lists. Every
+ * number is computed from real records: task statuses from the DB,
+ * link/screenshot totals from the collectors' own summary.json files
+ * in AI-Tasks, and PDF reports from the registered created files.
+ * Nothing is estimated; an unreadable summary is skipped.
+ */
+@Composable
+private fun ActivityMetricsStrip(repository: NovaRepository, tasks: List<AgentTaskEntity>) {
+    val createdFiles by repository.createdFiles.collectAsState(initial = emptyList())
+    var metrics by remember { mutableStateOf<ActivityMetrics?>(null) }
+
+    LaunchedEffect(tasks, createdFiles) {
+        metrics = withContext(Dispatchers.IO) {
+            val wm = repository.workspaceManager
+            val linksJsons = mutableListOf<String>()
+            val shotsJsons = mutableListOf<String>()
+            try {
+                for (entry in wm.listFiles("AI-Tasks")) {
+                    when {
+                        entry.isDirectory && entry.name.startsWith("screenshots-") -> {
+                            val summary = wm.listFiles(entry.relativePath)
+                                .firstOrNull { it.name == "summary.json" }
+                            if (summary != null) {
+                                try {
+                                    shotsJsons += wm.readFile(summary.relativePath)
+                                } catch (ignored: Exception) {
+                                }
+                            }
+                        }
+                        !entry.isDirectory && entry.name.startsWith("facebook-post-links-") &&
+                            entry.name.endsWith("-summary.json") -> {
+                            try {
+                                linksJsons += wm.readFile(entry.relativePath)
+                            } catch (ignored: Exception) {
+                            }
+                        }
+                    }
+                }
+            } catch (ignored: Exception) {
+            }
+            ActivityMetricsAggregator.aggregate(
+                taskStatuses = tasks.map { it.status },
+                linksSummaryJsons = linksJsons,
+                screenshotsSummaryJsons = shotsJsons,
+                createdFilePaths = createdFiles.map { it.relativePath }
+            )
+        }
+    }
+
+    val m = metrics ?: return
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, StoneLight)
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "Activity — all time",
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+            )
+            Row(modifier = Modifier.fillMaxWidth()) {
+                MetricCell("Tasks completed", m.completedTasks, Modifier.weight(1f))
+                MetricCell("Tasks failed", m.failedTasks, Modifier.weight(1f))
+                MetricCell("Collector runs", m.collectorRuns, Modifier.weight(1f))
+            }
+            Row(modifier = Modifier.fillMaxWidth()) {
+                MetricCell("Post links collected", m.uniquePostLinks, Modifier.weight(1f))
+                MetricCell("Screenshots taken", m.screenshotsTaken, Modifier.weight(1f))
+                MetricCell("PDF reports", m.pdfReports, Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun MetricCell(label: String, value: Int, modifier: Modifier = Modifier) {
+    Column(modifier = modifier) {
+        Text(
+            text = value.toString(),
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp, color = StoneMuted)
+        )
+    }
+}
+
+/**
  * TRAINED TASKS — pre-programmed, deterministic automations that run
  * with zero AI calls. Trained Task #1: the Facebook Post Links
  * Collector (Mode 1 form + live result view).
@@ -778,10 +876,15 @@ private fun FacebookLinksCollectorCard(repository: NovaRepository) {
     var prefilled by remember { mutableStateOf(false) }
     var showInvalidConfirm by remember { mutableStateOf(false) }
 
-    // Prefill from the saved list once (never overwrites typed text).
+    // Prefill from the saved list once (never overwrites typed text),
+    // and initialize the controls from the Settings collector defaults
+    // (Round B) — also once, at first composition.
     LaunchedEffect(Unit) {
         if (!prefilled) {
             prefilled = true
+            val defaults = withContext(Dispatchers.IO) { repository.loadCollectorDefaults() }
+            countText = defaults.linksPerSource.toString()
+            mode = defaults.method
             val saved = withContext(Dispatchers.IO) { repository.loadSavedFacebookProfiles() }
             if (saved.isNotBlank() && profilesText.isBlank()) {
                 profilesText = saved
@@ -1107,10 +1210,15 @@ private fun ScreenshotsCollectorCard(repository: NovaRepository) {
     var prefilled by remember { mutableStateOf(false) }
     var showInvalidConfirm by remember { mutableStateOf(false) }
 
-    // Prefill from the saved list once (never overwrites typed text).
+    // Prefill from the saved list once (never overwrites typed text),
+    // and initialize the controls from the Settings collector defaults
+    // (Round B) — also once, at first composition.
     LaunchedEffect(Unit) {
         if (!prefilled) {
             prefilled = true
+            val defaults = withContext(Dispatchers.IO) { repository.loadCollectorDefaults() }
+            countText = defaults.screenshotPostsPerProfile.toString()
+            mode = defaults.method
             val saved = withContext(Dispatchers.IO) { repository.loadSavedScreenshotProfiles() }
             if (saved.isNotBlank() && sourcesText.isBlank()) {
                 sourcesText = saved

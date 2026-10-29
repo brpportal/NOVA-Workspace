@@ -16,6 +16,8 @@ import com.example.nova.browser.BrowserControlMode
 import com.example.nova.browser.BrowserController
 import com.example.nova.linux.LinuxManager
 import com.example.nova.notifications.TaskNotificationHelper
+import com.example.nova.trained.CollectorDefaults
+import com.example.nova.trained.CollectorReport
 import com.example.nova.trained.FacebookCollectRunResult
 import com.example.nova.trained.FacebookExtractionMode
 import com.example.nova.trained.FacebookLinksCollector
@@ -23,6 +25,7 @@ import com.example.nova.trained.FacebookPostLinks
 import com.example.nova.trained.FacebookProfileResult
 import com.example.nova.trained.FacebookProfileStatus
 import com.example.nova.trained.FacebookRunArtifacts
+import com.example.nova.trained.PdfReportWriter
 import com.example.nova.trained.ScreenshotSourceResult
 import com.example.nova.trained.ScreenshotsCollection
 import com.example.nova.trained.ScreenshotsCollector
@@ -193,6 +196,15 @@ class NovaRepository(
                 delay(30_000)
             }
         }
+        // Round B: interrupted-task recovery. Tasks left in an
+        // in-flight status by a previous (dead) process are marked
+        // FAILED with an honest "Interrupted" step — never completed.
+        // Runs once per process; see InterruptedTasks for the rules.
+        scope.launch {
+            try {
+                markInterruptedTasks()
+            } catch (ignored: Exception) {}
+        }
         // Post a notification when a task transitions into a terminal or
         // needs-you state. The first emission only seeds the baseline so
         // existing tasks don't notify on app start.
@@ -213,6 +225,61 @@ class NovaRepository(
                 previousStatuses = current
             }
         }
+    }
+
+    /**
+     * Round B: marks tasks orphaned by a previous process as FAILED
+     * (see [InterruptedTasks]). Returns how many were marked; the
+     * once-per-process guard lives here so repeat repository
+     * construction can never re-mark a live task.
+     */
+    internal suspend fun markInterruptedTasks(): Int {
+        if (!interruptedSweepDone.compareAndSet(false, true)) return 0
+        val all = taskDao.getAllTasks().firstOrNull() ?: return 0
+        val orphaned = InterruptedTasks.selectOrphaned(all)
+        val nowMs = System.currentTimeMillis()
+        for (task in orphaned) {
+            try {
+                val steps = taskDao.getStepsForTask(task.id).firstOrNull().orEmpty()
+                val nextStep = (steps.maxOfOrNull { it.stepNumber } ?: 0) + 1
+                taskDao.insertStep(
+                    TaskStepEntity(
+                        taskId = task.id,
+                        stepNumber = nextStep,
+                        description = InterruptedTasks.INTERRUPTED_STEP,
+                        toolName = "interrupted_recovery",
+                        status = "FAILED"
+                    )
+                )
+                taskDao.updateTask(
+                    task.copy(
+                        status = "FAILED",
+                        currentOperation = InterruptedTasks.INTERRUPTED_OPERATION,
+                        errorMessage = InterruptedTasks.INTERRUPTED_OPERATION,
+                        completedAt = nowMs,
+                        updatedAt = nowMs
+                    )
+                )
+            } catch (ignored: Exception) {
+            }
+        }
+        return orphaned.size
+    }
+
+    /** Round B: the Settings screen's collector defaults, clamped on read. */
+    suspend fun loadCollectorDefaults(): CollectorDefaults {
+        val values = mutableMapOf<String, String>()
+        for (key in listOf(
+            CollectorDefaults.KEY_METHOD,
+            CollectorDefaults.KEY_LINKS_PER_SOURCE,
+            CollectorDefaults.KEY_SCREENSHOT_POSTS
+        )) {
+            try {
+                settingsDao.getSetting(key)?.let { values[key] = it }
+            } catch (ignored: Exception) {
+            }
+        }
+        return CollectorDefaults.fromSettings(values)
     }
 
     private suspend fun checkApprovalTimeouts() {
@@ -444,6 +511,9 @@ class NovaRepository(
         /** Workspace file holding the collector's saved profile list. */
         const val FACEBOOK_PROFILES_FILE = "AI-Tasks/facebook-profiles.txt"
         const val SCREENSHOT_PROFILES_FILE = "AI-Tasks/screenshot-profiles.txt"
+
+        /** Once-per-process guard for the interrupted-task sweep. */
+        private val interruptedSweepDone = java.util.concurrent.atomic.AtomicBoolean(false)
 
         @Volatile
         private var INSTANCE: NovaRepository? = null
@@ -960,6 +1030,44 @@ class NovaRepository(
                     if (writtenArtifacts.size > 1) {
                         recordStep("Artifacts written: ${writtenArtifacts.joinToString(", ")}")
                     }
+                    // Round B: report.pdf next to the other artifacts.
+                    // This block runs on EVERY exit path — including a
+                    // Stop Task cancellation — so partial runs get their
+                    // report too, with the counts they actually reached.
+                    val reportRelPath = "AI-Tasks/facebook-post-links-$fileStamp-report.pdf"
+                    val reportStatusLabel = loginStoppedLabel
+                        ?: if (terminalStatus == "COMPLETED") {
+                            "COMPLETED"
+                        } else {
+                            "FAILED" + (terminalError?.let { " — $it" } ?: "")
+                        }
+                    val reportModel = CollectorReport.buildLinksReport(
+                        results = collected,
+                        config = config,
+                        taskId = taskId,
+                        finalStatus = reportStatusLabel,
+                        artifactNames = (writtenArtifacts + reportRelPath)
+                            .map { it.substringAfterLast('/') },
+                        stoppedEarlyNote = stopNote
+                    )
+                    if (PdfReportWriter.write(reportModel, workspaceManager.resolve(reportRelPath))) {
+                        try {
+                            val meta = workspaceManager.getFileMetadata(reportRelPath)
+                            agentCreatedFileDao.insertCreatedFile(
+                                AgentCreatedFileEntity(
+                                    relativePath = reportRelPath,
+                                    name = meta.name,
+                                    taskId = taskId,
+                                    mimeType = meta.mimeType,
+                                    sizeBytes = meta.sizeBytes,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                            writtenArtifacts += reportRelPath
+                            recordStep("PDF report written: $reportRelPath")
+                        } catch (ignored: Exception) {
+                        }
+                    }
                 }
             } catch (ignored: Exception) {
             }
@@ -1267,6 +1375,30 @@ class NovaRepository(
                     val summaryJson = ScreenshotsCollection.buildSummaryJson(collected, config)
                     if (workspaceManager.writeFile(summaryRelPath, summaryJson) && registerExisting(summaryRelPath)) {
                         writtenArtifacts += summaryRelPath
+                    }
+                    // Round B: report.pdf inside the run folder, on
+                    // every exit path (partial captures included).
+                    val reportRelPath = "$runRel/report.pdf"
+                    val reportStatusLabel = loginStoppedLabel
+                        ?: if (terminalStatus == "COMPLETED") {
+                            "COMPLETED"
+                        } else {
+                            "FAILED" + (terminalError?.let { " — $it" } ?: "")
+                        }
+                    val reportModel = CollectorReport.buildScreenshotsReport(
+                        results = collected,
+                        config = config,
+                        taskId = taskId,
+                        finalStatus = reportStatusLabel,
+                        artifactNames = (writtenArtifacts + reportRelPath)
+                            .map { it.substringAfterLast('/') },
+                        stoppedEarlyNote = stopNote
+                    )
+                    if (PdfReportWriter.write(reportModel, workspaceManager.resolve(reportRelPath)) &&
+                        registerExisting(reportRelPath)
+                    ) {
+                        writtenArtifacts += reportRelPath
+                        recordStep("PDF report written: $reportRelPath")
                     }
                     if (writtenArtifacts.isNotEmpty()) {
                         recordStep("Artifacts written: ${writtenArtifacts.joinToString(", ")}")

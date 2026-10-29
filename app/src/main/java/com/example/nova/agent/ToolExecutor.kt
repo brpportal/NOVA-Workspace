@@ -8,10 +8,12 @@ import com.example.nova.linux.LinuxManager
 import com.example.nova.linux.LinuxToolCatalog
 import com.example.nova.security.SecretRedactor
 import com.example.nova.security.VaultManager
+import com.example.nova.trained.CollectorReport
 import com.example.nova.trained.FacebookExtractionMode
 import com.example.nova.trained.FacebookLinksCollector
 import com.example.nova.trained.FacebookPostLinks
 import com.example.nova.trained.FacebookRunArtifacts
+import com.example.nova.trained.PdfReportWriter
 import com.example.nova.trained.ScreenshotsCollection
 import com.example.nova.trained.ScreenshotsCollector
 import com.example.nova.workspace.WorkspaceManager
@@ -253,6 +255,22 @@ class ToolExecutor(
                         val savedArtifacts = artifactRels.filter { (path, content) ->
                             workspaceManager.writeFile(path, content)
                         }.map { it.first }
+                        // Round B: report.pdf next to the other
+                        // artifacts (the agent loop registers
+                        // outputFiles in Created by Spark).
+                        val reportRel = "AI-Tasks/facebook-post-links-$stamp-report.pdf"
+                        val reportModel = CollectorReport.buildLinksReport(
+                            results = listOf(result),
+                            config = config.copy(finishedAtMs = System.currentTimeMillis()),
+                            taskId = "tool-run-$stamp",
+                            finalStatus = FacebookPostLinks.statusSummaryLine(listOf(result)),
+                            artifactNames = ((if (saved) listOf(rel) else emptyList()) +
+                                savedArtifacts + reportRel).map { it.substringAfterLast('/') },
+                            stoppedEarlyNote = null
+                        )
+                        val pdfSaved = PdfReportWriter.write(
+                            reportModel, workspaceManager.resolve(reportRel)
+                        )
                         val sb = StringBuilder()
                         sb.append("Profile: ").append(result.normalizedUrl.ifBlank { result.profile }).append('\n')
                         sb.append("Status: ").append(result.status.name)
@@ -270,9 +288,11 @@ class ToolExecutor(
                         if (savedArtifacts.isNotEmpty()) {
                             sb.append("\nArtifacts: ").append(savedArtifacts.joinToString(", "))
                         }
+                        if (pdfSaved) sb.append("\nReport: ").append(reportRel)
                         ToolExecutionResult(
                             true, sb.toString(),
-                            outputFiles = (if (saved) listOf(rel) else emptyList()) + savedArtifacts
+                            outputFiles = (if (saved) listOf(rel) else emptyList()) + savedArtifacts +
+                                (if (pdfSaved) listOf(reportRel) else emptyList())
                         )
                     }
                 }
@@ -351,6 +371,21 @@ class ToolExecutor(
                             summaryRel,
                             ScreenshotsCollection.buildSummaryJson(outcome.results, config)
                         )
+                        // Round B: report.pdf inside the run folder.
+                        val reportRel = "$runRel/report.pdf"
+                        val reportModel = CollectorReport.buildScreenshotsReport(
+                            results = outcome.results,
+                            config = config.copy(finishedAtMs = System.currentTimeMillis()),
+                            taskId = "tool-run-$stamp",
+                            finalStatus = ScreenshotsCollection.statusSummaryLine(outcome.results),
+                            artifactNames = (listOf(indexRel, summaryRel, reportRel) +
+                                outcome.results.flatMap { r -> r.shots.map { it.relativePath } })
+                                .map { it.substringAfterLast('/') },
+                            stoppedEarlyNote = outcome.stopReason
+                        )
+                        val pdfSaved = PdfReportWriter.write(
+                            reportModel, workspaceManager.resolve(reportRel)
+                        )
                         val outputFiles = mutableListOf<String>()
                         val sb = StringBuilder()
                         sb.append("Screenshots run folder: ").append(runRel).append('\n')
@@ -376,8 +411,10 @@ class ToolExecutor(
                         outcome.stopReason?.let { sb.append("Stopped early: ").append(it).append('\n') }
                         if (savedIndex) sb.append("Index: ").append(indexRel).append('\n')
                         if (savedSummary) sb.append("Summary: ").append(summaryRel).append('\n')
+                        if (pdfSaved) sb.append("Report: ").append(reportRel).append('\n')
                         if (savedIndex) outputFiles += indexRel
                         if (savedSummary) outputFiles += summaryRel
+                        if (pdfSaved) outputFiles += reportRel
                         ToolExecutionResult(true, sb.toString(), outputFiles = outputFiles)
                     }
                 }
