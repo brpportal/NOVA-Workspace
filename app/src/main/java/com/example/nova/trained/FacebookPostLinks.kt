@@ -653,10 +653,15 @@ object FacebookPostLinks {
     private const val MAX_MINING_CHARS = 2_000_000
     private val PERMALINK_URL_REGEX = Regex(""""permalink_url"\s*:\s*"([^"]+)"""")
     private val FULL_URL_REGEX = Regex("""https?://[^\s"'<>\\]+""")
-    private val PATH_POST_REGEX = Regex("""/(?:[A-Za-z0-9._~%-]+/)*?(?:posts|videos)/[A-Za-z0-9_-]+""")
+    // The (?<![\w/]) lookbehind keeps path matches OUT of full URLs: a
+    // match may not start right after a word char or a slash, so the
+    // "/www.facebook.com/…/posts/…" tail of an https:// URL can never
+    // be re-minted as a doubled-host link. Quoted JSON paths (":/…",
+    // "\"/…") still match.
+    private val PATH_POST_REGEX = Regex("""(?<![\w/])/(?:[A-Za-z0-9._~%-]+/)*?(?:posts|videos)/[A-Za-z0-9_-]+""")
     private val PATH_ENDPOINT_REGEX = Regex(
-        """/(?:story|permalink)\.php\?story_fbid=[A-Za-z0-9_-]+(?:&id=\d+)?""" +
-            """|/photo\.php\?fbid=\d+|/photo/\?fbid=\d+|/watch/\?v=[A-Za-z0-9_-]+"""
+        """(?<![\w/])/(?:story|permalink)\.php\?story_fbid=[A-Za-z0-9_-]+(?:&id=\d+)?""" +
+            """|(?<![\w/])/photo\.php\?fbid=\d+|(?<![\w/])/photo/\?fbid=\d+|(?<![\w/])/watch/\?v=[A-Za-z0-9_-]+"""
     )
     private val TOP_LEVEL_POST_ID_REGEX = Regex(""""top_level_post_id"\s*:\s*"?(\d{8,}|pfbid[A-Za-z0-9_-]+)"?""")
     private val STORY_FBID_REGEX = Regex(""""story_fbid"\s*:\s*"?([A-Za-z0-9_-]{6,})"?""")
