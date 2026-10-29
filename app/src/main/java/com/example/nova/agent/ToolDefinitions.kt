@@ -231,13 +231,14 @@ object ToolDefinitions {
         ),
         AIToolDefinition(
             name = "collect_facebook_post_links",
-            description = "Trained Task #1: collects the latest post links of ONE Facebook profile, deterministically (no browsing decisions needed). Give a profile URL; it visits the profile, scrolls, and returns up to `count` post permalinks (default 5, allowed 3-7), latest first, tracking parameters stripped, plus a precise status: OK (all found), PARTIAL (fewer exist), NO_POSTS, PROFILE_LOCKED, PROFILE_UNAVAILABLE, OPEN_FAILED, FB_ERROR, or LOGIN_REQUIRED. The result is also saved to a markdown file in AI-Tasks/. If the status is LOGIN_REQUIRED, Facebook needs the user to log in: tell the user, do NOT ask for or enter any credentials, and do not retry in a loop. Call once per profile when the user asks for several profiles. Never invent or guess links — report exactly what this tool returns.",
+            description = "Trained Task #1: collects the latest post links of ONE Facebook profile, deterministically (no browsing decisions needed). Give a profile URL; it visits the profile, scrolls, and returns up to `count` post permalinks (default 5, allowed 1-100), latest first, tracking parameters stripped, plus a precise status: OK (all found), PARTIAL (fewer exist), NO_POSTS, PROFILE_LOCKED, PROFILE_UNAVAILABLE, OPEN_FAILED, FB_ERROR, or LOGIN_REQUIRED. `method` selects the extraction methods: hybrid (default; the full M1-M5 ladder), m1 (visible rendered-DOM links only), or m3 (page-source structured-data mining only). The result is also saved to a markdown file plus results.txt/.csv, results.json and summary.json artifacts in AI-Tasks/. If the status is LOGIN_REQUIRED, Facebook needs the user to log in: tell the user, do NOT ask for or enter any credentials, and do not retry in a loop. Call once per profile when the user asks for several profiles. Never invent or guess links — report exactly what this tool returns.",
             parametersSchemaJson = """
             {
                 "type": "object",
                 "properties": {
                     "profile_url": { "type": "string", "description": "Facebook profile URL, e.g. https://www.facebook.com/some.page or a profile.php?id=... link" },
-                    "count": { "type": "integer", "description": "How many latest post links to collect (3-7, default 5)" }
+                    "count": { "type": "integer", "description": "How many latest post links to collect (1-100, default 5)" },
+                    "method": { "type": "string", "enum": ["hybrid", "m1", "m3"], "description": "Extraction method: hybrid = full M1-M5 ladder (default), m1 = visible DOM links only, m3 = structured-data mining only" }
                 },
                 "required": ["profile_url"]
             }

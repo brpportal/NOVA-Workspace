@@ -28,8 +28,11 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -76,6 +79,8 @@ import com.example.nova.data.AgentTaskEntity
 import com.example.nova.data.ApprovalRecordEntity
 import com.example.nova.data.NovaRepository
 import com.example.nova.data.TaskStepEntity
+import androidx.compose.ui.text.input.KeyboardType
+import com.example.nova.trained.FacebookExtractionMode
 import com.example.nova.trained.FacebookPostLinks
 import com.example.nova.trained.FacebookProfileStatus
 import com.example.ui.theme.StoneLight
@@ -732,6 +737,7 @@ fun AuditTimelineRow(event: AuditTimelineEvent) {
  * with zero AI calls. Trained Task #1: the Facebook Post Links
  * Collector (Mode 1 form + live result view).
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TrainedTasksSection(repository: NovaRepository) {
     val context = LocalContext.current
@@ -739,9 +745,13 @@ fun TrainedTasksSection(repository: NovaRepository) {
     val runState by repository.lastFacebookCollectRun.collectAsState()
 
     var profilesText by remember { mutableStateOf("") }
-    var postsPerProfile by remember { mutableIntStateOf(FacebookPostLinks.DEFAULT_POSTS_PER_PROFILE) }
+    // Round A: the per-profile limit is typed/chip-picked as text and
+    // clamped to 1–100 (default 5); the clamp is shown, never silent.
+    var countText by remember { mutableStateOf(FacebookPostLinks.DEFAULT_POSTS_PER_PROFILE.toString()) }
+    var mode by remember { mutableStateOf(FacebookExtractionMode.HYBRID) }
     var saveList by remember { mutableStateOf(true) }
     var prefilled by remember { mutableStateOf(false) }
+    var showInvalidConfirm by remember { mutableStateOf(false) }
 
     // Prefill from the saved list once (never overwrites typed text).
     LaunchedEffect(Unit) {
@@ -754,8 +764,20 @@ fun TrainedTasksSection(repository: NovaRepository) {
         }
     }
 
-    val profileLines = profilesText.lines().map { it.trim() }.filter { it.isNotBlank() }
+    // Input hygiene, computed live from the raw text: valid unique
+    // sources (labelled Link 1..N), invalid lines WITH line numbers,
+    // and the duplicate count. Nothing is silently dropped.
+    val inputParse = remember(profilesText) { FacebookPostLinks.parseCollectorInput(profilesText) }
+    val parsedCount = countText.trim().toIntOrNull()
+    val postsPerProfile = parsedCount?.let { FacebookPostLinks.clampPostsPerProfile(it) }
+        ?: FacebookPostLinks.DEFAULT_POSTS_PER_PROFILE
+    val countClamped = parsedCount != null && parsedCount != postsPerProfile
     val running = runState?.running == true
+
+    fun startRun() {
+        repository.launchFacebookPostLinksCollectorFromText(profilesText, postsPerProfile, saveList, mode)
+        android.widget.Toast.makeText(context, "Collector started — watch the task below", android.widget.Toast.LENGTH_SHORT).show()
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -787,6 +809,7 @@ fun TrainedTasksSection(repository: NovaRepository) {
                 modifier = Modifier.fillMaxWidth().testTag("fb_collector_profiles_field")
             )
 
+            // ---- Per-source limit: presets + custom (Round A, 1–100) ----
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -796,19 +819,119 @@ fun TrainedTasksSection(repository: NovaRepository) {
                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
                 )
                 Spacer(modifier = Modifier.weight(1f))
-                OutlinedButton(
-                    onClick = { postsPerProfile = (postsPerProfile - 1).coerceAtLeast(FacebookPostLinks.MIN_POSTS_PER_PROFILE) },
-                    enabled = !running && postsPerProfile > FacebookPostLinks.MIN_POSTS_PER_PROFILE
-                ) { Text("−") }
                 Text(
                     text = postsPerProfile.toString(),
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                     modifier = Modifier.testTag("fb_collector_count")
                 )
-                OutlinedButton(
-                    onClick = { postsPerProfile = (postsPerProfile + 1).coerceAtMost(FacebookPostLinks.MAX_POSTS_PER_PROFILE) },
-                    enabled = !running && postsPerProfile < FacebookPostLinks.MAX_POSTS_PER_PROFILE
-                ) { Text("+") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (preset in listOf(10, 25, 50, 100)) {
+                    FilterChip(
+                        selected = parsedCount == preset,
+                        onClick = { countText = preset.toString() },
+                        enabled = !running,
+                        label = { Text(preset.toString()) },
+                        modifier = Modifier.testTag("fb_collector_preset_$preset")
+                    )
+                }
+            }
+            OutlinedTextField(
+                value = countText,
+                onValueChange = { countText = it.filter { c -> c.isDigit() }.take(3) },
+                label = { Text("Custom count (1–100)") },
+                singleLine = true,
+                enabled = !running,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth().testTag("fb_collector_custom_count")
+            )
+            if (countClamped) {
+                Text(
+                    text = "Count will be clamped to $postsPerProfile (allowed range is 1–100).",
+                    style = MaterialTheme.typography.bodySmall.copy(color = WarmWarning),
+                    modifier = Modifier.testTag("fb_collector_clamp_note")
+                )
+            }
+
+            // ---- Extraction method (Round A) ----
+            Text(
+                text = "Extraction method",
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = mode == FacebookExtractionMode.HYBRID,
+                    onClick = { mode = FacebookExtractionMode.HYBRID },
+                    enabled = !running,
+                    label = { Text("Hybrid") },
+                    modifier = Modifier.testTag("fb_collector_method_hybrid")
+                )
+                FilterChip(
+                    selected = mode == FacebookExtractionMode.M1_ONLY,
+                    onClick = { mode = FacebookExtractionMode.M1_ONLY },
+                    enabled = !running,
+                    label = { Text("M1 only") },
+                    modifier = Modifier.testTag("fb_collector_method_m1")
+                )
+                FilterChip(
+                    selected = mode == FacebookExtractionMode.M3_ONLY,
+                    onClick = { mode = FacebookExtractionMode.M3_ONLY },
+                    enabled = !running,
+                    label = { Text("M3 only") },
+                    modifier = Modifier.testTag("fb_collector_method_m3")
+                )
+            }
+            Text(
+                text = when (mode) {
+                    FacebookExtractionMode.HYBRID ->
+                        "Hybrid (recommended): visible links first, then structured-data mining and fallbacks (M1→M5)."
+                    FacebookExtractionMode.M1_ONLY ->
+                        "M1 only: links from the rendered page only (profile, Posts section, mbasic) — no source mining, no desktop variant."
+                    FacebookExtractionMode.M3_ONLY ->
+                        "M3 only: mines the page's embedded structured data (permalink_url and post IDs) while scrolling."
+                },
+                style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted)
+            )
+
+            // ---- Input hygiene: duplicates, invalid lines, labels ----
+            if (inputParse.duplicatesRemoved > 0) {
+                Text(
+                    text = "${inputParse.duplicatesRemoved} duplicate line${if (inputParse.duplicatesRemoved == 1) "" else "s"} removed",
+                    style = MaterialTheme.typography.bodySmall.copy(color = WarmWarning),
+                    modifier = Modifier.testTag("fb_collector_duplicates_note")
+                )
+            }
+            if (inputParse.invalidLines.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "Invalid lines (not valid URLs — they will not run):",
+                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold, color = WarmError)
+                    )
+                    for (invalid in inputParse.invalidLines) {
+                        Text(
+                            text = "Line ${invalid.lineNumber}: ${invalid.raw}",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = FontFamily.Monospace, color = WarmError, fontSize = 11.sp
+                            )
+                        )
+                    }
+                }
+            }
+            if (inputParse.sources.isNotEmpty()) {
+                Text(
+                    text = inputParse.labels.zip(inputParse.sources).joinToString("\n") { (label, src) -> "$label — $src" },
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = StoneMuted),
+                    modifier = Modifier.testTag("fb_collector_labels")
+                )
+                // Pre-run confirmation: sources × limit (a TARGET, not a
+                // guarantee), method, and the output formats.
+                Text(
+                    text = "Ready: ${inputParse.sources.size} source${if (inputParse.sources.size == 1) "" else "s"} × " +
+                        "$postsPerProfile links each = up to ${inputParse.sources.size * postsPerProfile} total " +
+                        "(target, not a guarantee) · Method: ${mode.displayName()} · Output: MD/TXT/CSV/JSON",
+                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                    modifier = Modifier.testTag("fb_collector_confirm_line")
+                )
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -827,13 +950,39 @@ fun TrainedTasksSection(repository: NovaRepository) {
 
             Button(
                 onClick = {
-                    repository.launchFacebookPostLinksCollector(profileLines, postsPerProfile, saveList)
-                    android.widget.Toast.makeText(context, "Collector started — watch the task below", android.widget.Toast.LENGTH_SHORT).show()
+                    if (inputParse.invalidLines.isNotEmpty()) {
+                        showInvalidConfirm = true
+                    } else {
+                        startRun()
+                    }
                 },
-                enabled = profileLines.isNotEmpty() && !running,
+                enabled = inputParse.sources.isNotEmpty() && !running,
                 modifier = Modifier.fillMaxWidth().testTag("fb_collector_run_button")
             ) {
                 Text(if (running) "Collecting…" else "Run Collector")
+            }
+
+            if (showInvalidConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showInvalidConfirm = false },
+                    title = { Text("Invalid lines in the list") },
+                    text = {
+                        Text(
+                            "These lines are not valid URLs and will be SKIPPED (not run):\n\n" +
+                                inputParse.invalidLines.joinToString("\n") { "Line ${it.lineNumber}: ${it.raw}" } +
+                                "\n\nRun the ${inputParse.sources.size} valid source(s) anyway?"
+                        )
+                    },
+                    confirmButton = {
+                        Button(onClick = {
+                            showInvalidConfirm = false
+                            startRun()
+                        }) { Text("Run anyway") }
+                    },
+                    dismissButton = {
+                        OutlinedButton(onClick = { showInvalidConfirm = false }) { Text("Cancel") }
+                    }
+                )
             }
 
             val state = runState
@@ -849,6 +998,20 @@ fun TrainedTasksSection(repository: NovaRepository) {
                     Text(
                         text = "Saved: $path",
                         style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted, fontFamily = FontFamily.Monospace)
+                    )
+                }
+                val extraArtifacts = state.artifactPaths.filter { it != state.resultFilePath }
+                if (extraArtifacts.isNotEmpty()) {
+                    Text(
+                        text = "Also saved: ${extraArtifacts.joinToString(", ")}",
+                        style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted, fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+                        modifier = Modifier.testTag("fb_collector_artifacts")
+                    )
+                }
+                if (!state.running && state.results.isNotEmpty()) {
+                    Text(
+                        text = "Method: ${state.mode.displayName()}",
+                        style = MaterialTheme.typography.bodySmall.copy(color = StoneMuted)
                     )
                 }
 

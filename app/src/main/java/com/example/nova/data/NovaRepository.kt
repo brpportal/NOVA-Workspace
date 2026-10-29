@@ -16,10 +16,12 @@ import com.example.nova.browser.BrowserControlMode
 import com.example.nova.browser.BrowserController
 import com.example.nova.notifications.TaskNotificationHelper
 import com.example.nova.trained.FacebookCollectRunResult
+import com.example.nova.trained.FacebookExtractionMode
 import com.example.nova.trained.FacebookLinksCollector
 import com.example.nova.trained.FacebookPostLinks
 import com.example.nova.trained.FacebookProfileResult
 import com.example.nova.trained.FacebookProfileStatus
+import com.example.nova.trained.FacebookRunArtifacts
 import com.example.nova.security.PermissionManager
 import com.example.nova.security.VaultManager
 import com.example.nova.workspace.WorkspaceManager
@@ -674,21 +676,47 @@ class NovaRepository(
         rawProfiles: List<String>,
         count: Int,
         saveList: Boolean
+    ): String = launchFacebookPostLinksCollectorFromText(
+        rawProfiles.joinToString("\n"),
+        count,
+        saveList,
+        FacebookExtractionMode.HYBRID
+    )
+
+    /**
+     * Round A entry: the raw multiline source text is parsed HERE
+     * (trim, validate, dedupe, label) so invalid lines are surfaced in
+     * the audit trail with their line numbers — never silently dropped
+     * — and the measured invalid/duplicate counts flow into the run's
+     * summary.json. [mode] selects the extraction methods (Hybrid /
+     * M1 only / M3 only). A finished run writes FIVE artifacts (the
+     * results .md plus results.txt/.csv, results.json, summary.json),
+     * all registered in Created by Spark.
+     */
+    fun launchFacebookPostLinksCollectorFromText(
+        rawText: String,
+        count: Int,
+        saveList: Boolean,
+        mode: FacebookExtractionMode
     ): String {
-        val profiles = rawProfiles.map { it.trim() }.filter { it.isNotBlank() }
-        val safeCount = count.coerceIn(
-            FacebookPostLinks.MIN_POSTS_PER_PROFILE,
-            FacebookPostLinks.MAX_POSTS_PER_PROFILE
-        )
+        val parse = FacebookPostLinks.parseCollectorInput(rawText)
+        val profiles = parse.sources
+        val safeCount = FacebookPostLinks.clampPostsPerProfile(count)
         val taskId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
         val fileStamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date(now))
         val resultRelPath = "AI-Tasks/facebook-post-links-$fileStamp.md"
+        val artifactRelPaths = listOf(
+            "AI-Tasks/facebook-post-links-$fileStamp-results.txt",
+            "AI-Tasks/facebook-post-links-$fileStamp-results.csv",
+            "AI-Tasks/facebook-post-links-$fileStamp-results.json",
+            "AI-Tasks/facebook-post-links-$fileStamp-summary.json"
+        )
 
         val task = AgentTaskEntity(
             id = taskId,
             title = "Facebook Post Links Collector",
-            prompt = "Trained task (no AI) — Facebook Post Links Collector: collect the latest $safeCount post links from ${profiles.size} Facebook profile(s). Runs deterministically without AI; pauses as Needs you only on a Facebook login wall.",
+            prompt = "Trained task (no AI) — Facebook Post Links Collector: collect the latest $safeCount post links from ${profiles.size} Facebook profile(s), method ${mode.displayName()}. Runs deterministically without AI; pauses as Needs you only on a Facebook login wall.",
             status = "PENDING",
             progressPercent = 0,
             currentOperation = "Starting collector",
@@ -700,7 +728,8 @@ class NovaRepository(
             taskId = taskId,
             requestedCount = safeCount,
             totalProfiles = profiles.size,
-            running = true
+            running = true,
+            mode = mode
         )
 
         val collector = FacebookLinksCollector(browserController)
@@ -803,9 +832,15 @@ class NovaRepository(
                     }
                 }
                 setTaskStatus("RUNNING", "Collecting post links")
-                recordStep("Collector started: ${profiles.size} profile(s), $safeCount link(s) each — no AI, deterministic run")
+                recordStep("Collector started: ${profiles.size} profile(s), $safeCount link(s) each, method ${mode.displayName()} — no AI, deterministic run")
+                if (parse.duplicatesRemoved > 0) {
+                    recordStep("${parse.duplicatesRemoved} duplicate source line(s) removed before the run")
+                }
+                for (invalidLine in parse.invalidLines) {
+                    recordStep("Line ${invalidLine.lineNumber} is not a valid URL — skipped, not run: ${invalidLine.raw}")
+                }
 
-                val outcome = collector.collectAll(profiles, safeCount, hooks) { result ->
+                val outcome = collector.collectAll(profiles, safeCount, hooks, mode) { result ->
                     collected.add(result)
                     val t = taskDao.getTaskById(taskId)
                     if (t != null && t.status != "CANCELLED") {
@@ -843,21 +878,24 @@ class NovaRepository(
                 terminalError = ProviderErrors.userMessage(e)
             }
 
-            // Result file — always written once the task exists (partial
-            // results included), and registered in Created by Spark.
+            // Result files — always written once the task exists (partial
+            // results included), and registered in Created by Spark. The
+            // .md is the original artifact (format unchanged); Round A
+            // adds results.txt/.csv + results.json + summary.json next
+            // to it, all from the same collected results.
             val summary = FacebookPostLinks.statusSummaryLine(collected)
             var writtenPath: String? = null
+            val writtenArtifacts = mutableListOf<String>()
             try {
                 if (taskDao.getTaskById(taskId) != null) {
                     workspaceManager.createDirectory("AI-Tasks")
-                    val md = FacebookPostLinks.formatResultsMarkdown(collected, safeCount, Date(now), stopNote)
-                    if (workspaceManager.writeFile(resultRelPath, md)) {
-                        writtenPath = resultRelPath
+                    suspend fun writeAndRegister(relPath: String, content: String): Boolean {
+                        if (!workspaceManager.writeFile(relPath, content)) return false
                         try {
-                            val meta = workspaceManager.getFileMetadata(resultRelPath)
+                            val meta = workspaceManager.getFileMetadata(relPath)
                             agentCreatedFileDao.insertCreatedFile(
                                 AgentCreatedFileEntity(
-                                    relativePath = resultRelPath,
+                                    relativePath = relPath,
                                     name = meta.name,
                                     taskId = taskId,
                                     mimeType = meta.mimeType,
@@ -867,6 +905,39 @@ class NovaRepository(
                             )
                         } catch (ignored: Exception) {
                         }
+                        return true
+                    }
+                    val md = FacebookPostLinks.formatResultsMarkdown(collected, safeCount, Date(now), stopNote)
+                    if (writeAndRegister(resultRelPath, md)) {
+                        writtenPath = resultRelPath
+                        writtenArtifacts += resultRelPath
+                    }
+                    val config = FacebookRunArtifacts.RunConfig(
+                        sources = profiles,
+                        perSourceLimit = safeCount,
+                        mode = mode,
+                        startedAtMs = now,
+                        finishedAtMs = System.currentTimeMillis(),
+                        invalidSourceLines = parse.invalidLines.size,
+                        duplicateSourceLines = parse.duplicatesRemoved
+                    )
+                    val artifactContents = listOf(
+                        artifactRelPaths[0] to
+                            FacebookRunArtifacts.buildResultsTxt(collected),
+                        artifactRelPaths[1] to
+                            FacebookRunArtifacts.buildResultsCsv(collected, config),
+                        artifactRelPaths[2] to
+                            FacebookRunArtifacts.buildResultsJson(collected, config),
+                        artifactRelPaths[3] to
+                            FacebookRunArtifacts.buildSummaryJson(collected, config)
+                    )
+                    for ((relPath, content) in artifactContents) {
+                        if (writeAndRegister(relPath, content)) {
+                            writtenArtifacts += relPath
+                        }
+                    }
+                    if (writtenArtifacts.size > 1) {
+                        recordStep("Artifacts written: ${writtenArtifacts.joinToString(", ")}")
                     }
                 }
             } catch (ignored: Exception) {
@@ -884,7 +955,8 @@ class NovaRepository(
                             loginStoppedLabel ?: terminalError ?: stopNote ?: "Stopped"
                         },
                         errorMessage = if (terminalStatus == "FAILED") (terminalError ?: stopNote) else null,
-                        createdFilesJson = writtenPath?.let { org.json.JSONArray(listOf(it)).toString() },
+                        createdFilesJson = writtenArtifacts.takeIf { it.isNotEmpty() }
+                            ?.let { org.json.JSONArray(it).toString() },
                         updatedAt = System.currentTimeMillis(),
                         completedAt = System.currentTimeMillis()
                     )
@@ -907,7 +979,9 @@ class NovaRepository(
                 resultFilePath = writtenPath,
                 running = false,
                 summaryLine = loginStoppedLabel
-                    ?: (summary + (stopNote?.let { " Stopped early: $it" } ?: ""))
+                    ?: (summary + (stopNote?.let { " Stopped early: $it" } ?: "")),
+                mode = mode,
+                artifactPaths = writtenArtifacts.toList()
             )
         }
         agentLoop.registerJob(taskId, job)

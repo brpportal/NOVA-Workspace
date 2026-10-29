@@ -5,8 +5,10 @@ import com.example.nova.data.MemoryDao
 import com.example.nova.data.MemoryEntryEntity
 import com.example.nova.security.SecretRedactor
 import com.example.nova.security.VaultManager
+import com.example.nova.trained.FacebookExtractionMode
 import com.example.nova.trained.FacebookLinksCollector
 import com.example.nova.trained.FacebookPostLinks
+import com.example.nova.trained.FacebookRunArtifacts
 import com.example.nova.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -196,8 +198,12 @@ class ToolExecutor(
                     // returns LOGIN_REQUIRED at once — the model must hand
                     // it to the user; credentials are never touched.
                     val profileUrl = arguments.optString("profile_url").trim()
-                    val requested = arguments.optInt("count", FacebookPostLinks.DEFAULT_POSTS_PER_PROFILE)
-                        .coerceIn(FacebookPostLinks.MIN_POSTS_PER_PROFILE, FacebookPostLinks.MAX_POSTS_PER_PROFILE)
+                    val requested = FacebookPostLinks.clampPostsPerProfile(
+                        arguments.optInt("count", FacebookPostLinks.DEFAULT_POSTS_PER_PROFILE)
+                    )
+                    val mode = FacebookExtractionMode.fromToolArg(
+                        arguments.optString("method")
+                    )
                     if (profileUrl.isBlank()) {
                         ToolExecutionResult(false, "profile_url is required", error = "profile_url is required")
                     } else {
@@ -208,8 +214,9 @@ class ToolExecutor(
                             override suspend fun onLoginWall(profileUrl: String) =
                                 FacebookLinksCollector.LoginWallDecision.SKIP_PROFILE
                         }
+                        val startedMs = System.currentTimeMillis()
                         val result = FacebookLinksCollector(browserController)
-                            .collectOne(profileUrl, requested, aiHooks)
+                            .collectOne(profileUrl, requested, aiHooks, mode)
                         val nowDate = java.util.Date()
                         val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(nowDate)
                         val rel = "AI-Tasks/facebook-post-links-$stamp.md"
@@ -218,11 +225,34 @@ class ToolExecutor(
                             rel,
                             FacebookPostLinks.formatResultsMarkdown(listOf(result), requested, nowDate, null)
                         )
+                        // Round A: the same four artifacts as a Tasks-screen
+                        // run, next to the .md (single-source config).
+                        val config = FacebookRunArtifacts.RunConfig(
+                            sources = listOf(profileUrl),
+                            perSourceLimit = requested,
+                            mode = mode,
+                            startedAtMs = startedMs,
+                            finishedAtMs = System.currentTimeMillis()
+                        )
+                        val artifactRels = listOf(
+                            "AI-Tasks/facebook-post-links-$stamp-results.txt" to
+                                FacebookRunArtifacts.buildResultsTxt(listOf(result)),
+                            "AI-Tasks/facebook-post-links-$stamp-results.csv" to
+                                FacebookRunArtifacts.buildResultsCsv(listOf(result), config),
+                            "AI-Tasks/facebook-post-links-$stamp-results.json" to
+                                FacebookRunArtifacts.buildResultsJson(listOf(result), config),
+                            "AI-Tasks/facebook-post-links-$stamp-summary.json" to
+                                FacebookRunArtifacts.buildSummaryJson(listOf(result), config)
+                        )
+                        val savedArtifacts = artifactRels.filter { (path, content) ->
+                            workspaceManager.writeFile(path, content)
+                        }.map { it.first }
                         val sb = StringBuilder()
                         sb.append("Profile: ").append(result.normalizedUrl.ifBlank { result.profile }).append('\n')
                         sb.append("Status: ").append(result.status.name)
                         result.note?.let { sb.append(" — ").append(it) }
                         sb.append('\n')
+                        sb.append("Method mode: ").append(mode.displayName()).append('\n')
                         result.methodsSummary?.let {
                             sb.append("Methods: ").append(it).append('\n')
                         }
@@ -231,7 +261,13 @@ class ToolExecutor(
                             sb.append(i + 1).append(". ").append(link).append('\n')
                         }
                         if (saved) sb.append("Saved: ").append(rel)
-                        ToolExecutionResult(true, sb.toString(), outputFiles = if (saved) listOf(rel) else emptyList())
+                        if (savedArtifacts.isNotEmpty()) {
+                            sb.append("\nArtifacts: ").append(savedArtifacts.joinToString(", "))
+                        }
+                        ToolExecutionResult(
+                            true, sb.toString(),
+                            outputFiles = (if (saved) listOf(rel) else emptyList()) + savedArtifacts
+                        )
                     }
                 }
                 "task_record_artifact" -> {

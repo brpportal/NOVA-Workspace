@@ -57,7 +57,22 @@ data class FacebookCollectRunResult(
     val results: List<FacebookProfileResult> = emptyList(),
     val resultFilePath: String? = null,
     val running: Boolean = false,
-    val summaryLine: String? = null
+    val summaryLine: String? = null,
+    /** The extraction mode the run used (stated in audit + artifacts). */
+    val mode: FacebookExtractionMode = FacebookExtractionMode.HYBRID,
+    /** Every artifact file written for the run (the .md first), once finished. */
+    val artifactPaths: List<String> = emptyList()
+)
+
+/**
+ * Provenance of one accepted permalink: which extraction method first
+ * produced it and when (epoch ms). Threaded through the ladder so the
+ * run artifacts (CSV/JSON) can attribute every link honestly.
+ */
+data class FacebookLinkAttribution(
+    /** Method code: "M1", "M2", "M3", "M4" or "M5". */
+    val method: String,
+    val discoveredAtMs: Long
 )
 
 /** One profile's collection result. [links] are normalized permalinks, latest first. */
@@ -71,8 +86,51 @@ data class FacebookProfileResult(
     /** Human-readable detail for non-OK outcomes (never a raw exception). */
     val note: String? = null,
     /** Escalation-ladder record: methods tried in order + which produced [links]. */
-    val methodsSummary: String? = null
+    val methodsSummary: String? = null,
+    /** Per-link provenance (method + discovery time), keyed by link. */
+    val linkAttribution: Map<String, FacebookLinkAttribution> = emptyMap()
 )
+
+/**
+ * Which extraction methods a collector run may use (Round A: the ladder
+ * exposed as a run option).
+ *
+ * - [HYBRID] — the full M1→M5 ladder, exactly as before.
+ * - [M1_ONLY] — rendered-DOM methods only: M1 anchors + scroll, M2 the
+ *   profile's Posts section, M5 mbasic. NO page-source mining anywhere
+ *   and NO desktop variant.
+ * - [M3_ONLY] — the source-mining loop only: settle + scroll + mine the
+ *   page source / outerHTML per pass (permalink_url first). Anchors are
+ *   read only as part of a mining pass; no M2/M4/M5 navigation.
+ */
+enum class FacebookExtractionMode {
+    HYBRID,
+    M1_ONLY,
+    M3_ONLY;
+
+    /** The Mode 2 tool argument value ("hybrid" | "m1" | "m3"). */
+    fun toolArg(): String = when (this) {
+        HYBRID -> "hybrid"
+        M1_ONLY -> "m1"
+        M3_ONLY -> "m3"
+    }
+
+    /** Short human label for the UI, audit trail and artifacts. */
+    fun displayName(): String = when (this) {
+        HYBRID -> "Hybrid (M1+M3 ladder)"
+        M1_ONLY -> "M1 only (visible links)"
+        M3_ONLY -> "M3 only (structured data)"
+    }
+
+    companion object {
+        /** Parses the tool argument; anything unrecognized means HYBRID. */
+        fun fromToolArg(raw: String?): FacebookExtractionMode = when (raw?.trim()?.lowercase(Locale.ROOT)) {
+            "m1", "m1_only", "m1-only" -> M1_ONLY
+            "m3", "m3_only", "m3-only" -> M3_ONLY
+            else -> HYBRID
+        }
+    }
+}
 
 /**
  * Raw signals probed from a loaded page, fed to the trained classifier
@@ -130,9 +188,199 @@ enum class FacebookPageClass {
  */
 object FacebookPostLinks {
 
-    const val MIN_POSTS_PER_PROFILE = 3
-    const val MAX_POSTS_PER_PROFILE = 7
+    // Round A: the per-profile limit is configurable 1–100 (was a hard
+    // 3–7 cap). The default stays 5.
+    const val MIN_POSTS_PER_PROFILE = 1
+    const val MAX_POSTS_PER_PROFILE = 100
     const val DEFAULT_POSTS_PER_PROFILE = 5
+
+    /** Clamps a requested per-profile count into the supported 1–100 range. */
+    fun clampPostsPerProfile(requested: Int): Int =
+        requested.coerceIn(MIN_POSTS_PER_PROFILE, MAX_POSTS_PER_PROFILE)
+
+    // Method codes used for per-link provenance (CSV/JSON artifacts).
+    const val METHOD_M1 = "M1"
+    const val METHOD_M2 = "M2"
+    const val METHOD_M3 = "M3"
+    const val METHOD_M4 = "M4"
+    const val METHOD_M5 = "M5"
+
+    /** Maps a ladder yield label ("M1 mobile", "M1+M3 combined", …) to its method code. */
+    fun methodCodeForYieldLabel(label: String): String = when {
+        label.startsWith("M1+M3") -> METHOD_M3
+        label.startsWith("M1") -> METHOD_M1
+        label.startsWith("M2") -> METHOD_M2
+        label.startsWith("M3") -> METHOD_M3
+        label.startsWith("M4") -> METHOD_M4
+        label.startsWith("M5") -> METHOD_M5
+        else -> METHOD_M1
+    }
+
+    // ------------------------------------------------------------------
+    // Count-aware budgets (Round A)
+    //
+    // The per-profile time budget grows with the requested count:
+    //   budget(N) = 180s base + 6s per requested link, ceiling 900s.
+    // At the default N=5 that is 210s (the old flat budget was 180s);
+    // at N=100 it is 780s. The ceiling exists so a fat-fingered count
+    // can never keep one profile on screen for an unbounded time; the
+    // dry-scroll stop and the early exit at N links end most profiles
+    // long before the budget matters.
+    //
+    // Scroll caps grow linearly too — each mobile scroll reveals only a
+    // handful of new posts, so a 100-post target needs proportionally
+    // more scrolls than a 5-post one:
+    //   maxScrolls(N)        = min(15 + N, 120)
+    //   fallbackScrolls(N)   = min(6 + N/2, 40)   (single M2/M4 harvest)
+    // ------------------------------------------------------------------
+
+    fun perProfileBudgetMs(count: Int): Long {
+        val n = clampPostsPerProfile(count)
+        return minOf(180_000L + 6_000L * n, 900_000L)
+    }
+
+    fun maxScrollsFor(count: Int): Int {
+        val n = clampPostsPerProfile(count)
+        return minOf(15 + n, 120)
+    }
+
+    fun fallbackScrollsFor(count: Int): Int {
+        val n = clampPostsPerProfile(count)
+        return minOf(6 + n / 2, 40)
+    }
+
+    // ------------------------------------------------------------------
+    // Per-link provenance tracking (pure)
+    // ------------------------------------------------------------------
+
+    /**
+     * First-finder-wins record of accepted permalinks. The collector
+     * threads one tracker through the whole ladder (and one per fallback
+     * harvest); merging two harvests keeps the EARLIEST method that
+     * produced each link, so "which method found it" stays truthful
+     * even when several methods see the same post.
+     */
+    class LinkProvenanceTracker(
+        private val nowMs: () -> Long = { System.currentTimeMillis() }
+    ) {
+        private val entries = LinkedHashMap<String, FacebookLinkAttribution>()
+
+        val size: Int get() = entries.size
+        fun isEmpty(): Boolean = entries.isEmpty()
+        operator fun contains(link: String): Boolean = entries.containsKey(link)
+
+        /** Records [link] under [method] if unseen. Returns true when new. */
+        fun add(link: String, method: String): Boolean {
+            if (entries.containsKey(link)) return false
+            entries[link] = FacebookLinkAttribution(method, nowMs())
+            return true
+        }
+
+        /** Records every unseen link in [links] under [method]. Returns how many were new. */
+        fun addAll(links: Iterable<String>, method: String): Int {
+            var added = 0
+            for (link in links) if (add(link, method)) added++
+            return added
+        }
+
+        /** Merges [other] into this tracker; existing (earlier) attributions win. */
+        fun absorb(other: LinkProvenanceTracker) {
+            for ((link, attribution) in other.entries) {
+                if (!entries.containsKey(link)) entries[link] = attribution
+            }
+        }
+
+        fun links(): List<String> = entries.keys.toList()
+        fun attribution(): Map<String, FacebookLinkAttribution> = LinkedHashMap(entries)
+        fun methodOf(link: String): String? = entries[link]?.method
+    }
+
+    // ------------------------------------------------------------------
+    // Source-list input hygiene (pure) — Trained Tasks card
+    // ------------------------------------------------------------------
+
+    /** One invalid input line: its 1-based line number in the raw text and the raw content. */
+    data class InvalidSourceLine(val lineNumber: Int, val raw: String)
+
+    /** The parsed source list: what will actually run, and what was rejected/removed. */
+    data class CollectorInputParse(
+        /** Unique, syntactically valid source lines (trimmed), in first-appearance order. */
+        val sources: List<String>,
+        /** "Link 1".."Link N", aligned with [sources]; used in results and artifacts. */
+        val labels: List<String>,
+        /** Non-blank lines that are NOT valid http/https URLs — never silently dropped. */
+        val invalidLines: List<InvalidSourceLine>,
+        /** How many lines were removed as duplicates of an earlier source. */
+        val duplicatesRemoved: Int
+    )
+
+    /**
+     * Syntactic source validation ONLY: an http/https scheme and a host
+     * must be present. (Whether the host is Facebook is the collector's
+     * per-profile concern, not the input form's.)
+     */
+    fun isValidSourceUrl(raw: String): Boolean {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return false
+        val uri = parseUri(trimmed) ?: return false
+        val scheme = uri.scheme?.lowercase(Locale.ROOT) ?: return false
+        if (scheme != "http" && scheme != "https") return false
+        return !uri.host.isNullOrBlank()
+    }
+
+    /**
+     * Parses the multiline source field: trims lines, ignores blanks,
+     * validates each remaining line, dedupes by NORMALIZED profile URL
+     * (so www./m. variants of one profile collapse) and labels the
+     * survivors Link 1..N. Invalid lines keep their original line
+     * numbers so the UI can point at them precisely.
+     */
+    fun parseCollectorInput(text: String): CollectorInputParse {
+        val sources = mutableListOf<String>()
+        val seenKeys = HashSet<String>()
+        val invalid = mutableListOf<InvalidSourceLine>()
+        var duplicates = 0
+        text.lines().forEachIndexed { index, rawLine ->
+            val line = rawLine.trim()
+            if (line.isBlank()) return@forEachIndexed
+            if (!isValidSourceUrl(line)) {
+                invalid += InvalidSourceLine(index + 1, line)
+                return@forEachIndexed
+            }
+            val key = normalizeProfileUrl(line).ifBlank { line }
+            if (!seenKeys.add(key)) {
+                duplicates++
+                return@forEachIndexed
+            }
+            sources += line
+        }
+        return CollectorInputParse(
+            sources = sources,
+            labels = sources.indices.map { "Link ${it + 1}" },
+            invalidLines = invalid,
+            duplicatesRemoved = duplicates
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // Post object type (from the normalized URL shape)
+    // ------------------------------------------------------------------
+
+    /** Classifies a normalized permalink: post / photo / video / story / watch. */
+    fun postObjectType(url: String): String {
+        val uri = parseUri(url)
+        val path = (uri?.path ?: "").lowercase(Locale.ROOT)
+        val params = parseQueryParams(uri?.rawQuery ?: "")
+        return when {
+            path == "/watch" || path == "/watch/" -> "watch"
+            VIDEOS_PATH_REGEX.containsMatchIn(path) -> "video"
+            path.endsWith("/photo.php") || path == "/photo" || path == "/photo/" -> "photo"
+            path.endsWith("/story.php") || path.endsWith("/permalink.php") -> "story"
+            POSTS_PATH_REGEX.containsMatchIn(path) -> "post"
+            params.containsKey("v") -> "watch"
+            else -> "post"
+        }
+    }
 
     // ------------------------------------------------------------------
     // Profile URL normalization

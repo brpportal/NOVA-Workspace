@@ -11,20 +11,28 @@ core also runs without AI from the Tasks screen ("Trained Tasks").
 
 ## The tool
 
-`collect_facebook_post_links(profile_url, count)`
+`collect_facebook_post_links(profile_url, count, method)`
 
 - ONE profile per call. For several profiles, call it once per profile,
   in the order the user gave them, and combine the results.
-- `count` = how many of the latest posts to collect: 3 to 7, default 5.
-  The links come back latest-first (page order), deduplicated, with
-  Facebook tracking parameters removed.
-- The result is also saved to a markdown file in AI-Tasks/ — mention
-  the saved file when you present the results.
+- `count` = how many of the latest posts to collect: 1 to 100,
+  default 5. The links come back latest-first (page order),
+  deduplicated, with Facebook tracking parameters removed.
+- `method` (optional) = which extraction methods to use:
+  `hybrid` (default — the full M1→M5 ladder below), `m1` (visible
+  rendered-page links only), or `m3` (embedded structured-data
+  mining only). Use the default unless the user asks for a
+  specific method.
+- The result is also saved in AI-Tasks/ as a markdown file plus
+  results.txt / results.csv / results.json / summary.json artifacts
+  (the CSV/JSON record which method found each link) — mention the
+  saved files when you present the results.
 
 ## How the collector tries (automatic — you do not drive this)
 
-The collector escalates through several methods per profile on its
-own, in order, and stops as soon as enough links are found:
+In hybrid mode (the default) the collector escalates through
+several methods per profile on its own, in order, and stops as soon
+as enough links are found:
 M1 the mobile profile (settle, extract, scroll) → M2 the profile's
 own Posts section → M3 mining the page's embedded data payloads —
 usually the strongest source, merged with M1's links → M4 the
@@ -32,7 +40,11 @@ desktop variant of the page → M5 the mbasic variant. The tool result
 reports which methods were tried and which one produced the links
 ("Methods: …"). A locked or unavailable profile stops the ladder at
 once; a login pause can only come from M1 — the fallbacks never ask
-for a login.
+for a login. In `m1` mode only the rendered-DOM methods run (M1,
+M2, M5 — no mining, no desktop variant); in `m3` mode only the
+mining loop runs. On the Tasks screen the same modes, a per-profile
+limit of 1–100, and duplicate/invalid-line checks are built into
+the Trained Tasks card.
 
 ## Statuses — report them exactly, never blur them
 
