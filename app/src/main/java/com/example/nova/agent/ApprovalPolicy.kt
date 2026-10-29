@@ -1,6 +1,8 @@
 package com.example.nova.agent
 
 import com.example.nova.browser.PageElement
+import com.example.nova.linux.LinuxCommandClassifier
+import com.example.nova.linux.LinuxCommandRisk
 import org.json.JSONObject
 
 /**
@@ -30,7 +32,13 @@ enum class ApprovalClass {
     DELETION,
 
     /** Moving files across trust boundaries (downloads / uploads). */
-    FILE_TRANSFER
+    FILE_TRANSFER,
+
+    /**
+     * Changing the device/system state outside the browser: installing
+     * packages or running non-read-only shell commands in the Linux guest.
+     */
+    SYSTEM_CHANGE
 }
 
 /**
@@ -62,7 +70,10 @@ object ApprovalPolicy {
         "get_set_of_marks", "clear_set_of_marks",
         // Trained Task #1: read-only link collection (never submits/posts)
         "collect_facebook_post_links",
+        // Trained Task #2: read-only screenshot capture (never submits/posts)
         "collect_screenshots",
+        // Linux Mode: reporting environment state changes nothing.
+        "linux_status",
         // Workspace / memory reads
         "file_list", "file_read", "file_search", "file_get_metadata",
         "memory_retrieve"
@@ -81,7 +92,8 @@ object ApprovalPolicy {
         ApprovalClass.POST_PUBLISH,
         ApprovalClass.PURCHASE_PAYMENT,
         ApprovalClass.DELETION,
-        ApprovalClass.FILE_TRANSFER
+        ApprovalClass.FILE_TRANSFER,
+        ApprovalClass.SYSTEM_CHANGE
     )
 
     fun requiresApproval(toolName: String, arguments: JSONObject, element: PageElement?): Boolean =
@@ -123,6 +135,19 @@ object ApprovalPolicy {
             // Injecting stored credentials into a page is consequential even
             // though the model never sees the secret.
             "vault_autofill" -> ApprovalClass.SENSITIVE_INPUT
+
+            // Linux Mode: installing a tool always changes the system.
+            "linux_install_tool" -> ApprovalClass.SYSTEM_CHANGE
+
+            // Linux Mode: a shell command is gated by what it can do —
+            // pure inspection commands (ls, cat, version probes) follow
+            // the read-only policy; installs, writes and deletions ask.
+            "linux_run" -> when (
+                LinuxCommandClassifier.classify(arguments.optString("command"))
+            ) {
+                LinuxCommandRisk.READ_ONLY -> ApprovalClass.READ_ONLY
+                LinuxCommandRisk.NEEDS_APPROVAL -> ApprovalClass.SYSTEM_CHANGE
+            }
 
             "file_delete" -> ApprovalClass.DELETION
 
